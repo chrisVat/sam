@@ -8,6 +8,7 @@ from utils import rank0_print
 import gc
 from transformers.trainer_pt_utils import LabelSmoother
 from functorch import vjp
+import time
 
 
 # custom trainer for functional sam designed for accumulating gradients
@@ -107,7 +108,8 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     # perturb the model using parameter gradients
                     self.optimizer.first_step_functional(zero_grad=True)
                     # get g_func_sam
-                    self.second_step_functional()              
+                    with torch.no_grad():
+                        self.second_step_functional()              
                     # unperturb model, optimizer step
                     self.optimizer.final_step(zero_grad=True)
 
@@ -124,15 +126,17 @@ class FSDPFunctionalSAMTrainer(Trainer):
                             del k, v
                         del accum_dict
                     
+                    del self.accumulated_inputs[:]
+                    del self.accumulated_logit_grads[:]
+
                     for grad in self.accumulated_logit_grads:
                         grad.detach()#.cpu()
                         del grad
 
-                    gc.collect()
-                    torch.cuda.empty_cache()
+                    #gc.collect()
+                    #torch.cuda.empty_cache()
 
                     # reset accumulators
-                    self.accumulated_inputs = []
                     self.accumulated_inputs = []
                     self.accumulated_logit_grads = []
 
@@ -163,22 +167,28 @@ class FSDPFunctionalSAMTrainer(Trainer):
             if self.args.eval_strategy == "epoch" and self.eval_dataset is not None:
                 print(f"Epoch {epoch+1} finished on rank {dist.get_rank()}. Awaiting evaluation...")
                 if torch.distributed.is_initialized():
-                    gc.collect()
-                    torch.cuda.empty_cache()
                     torch.distributed.barrier()
                 
+                    self.model.zero_grad(set_to_none=True)  # Free gradient memory
+                    torch.cuda.synchronize()
+                    gc.collect()
+
                 rank0_print("*** Beginning Evaluation ***")
                 with torch.no_grad():
                     self.model.eval()
                     eval_results = self.evaluate()
+                    self.model.train()
                 
-                self.model.train()
-                
-                gc.collect()
-                torch.cuda.empty_cache()
-                
-                self.log(eval_results)
                 rank0_print(f"Epoch {epoch+1} evaluation results: {eval_results}")
+                
+                eval_results = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in eval_results.items()}
+                self.log(eval_results)
+                del eval_results
+
+                self.model.zero_grad(set_to_none=True)  # Free gradient memory
+                torch.cuda.synchronize()
+                gc.collect
+                time.sleep(5)
 
             avg_epoch_loss = self.epoch_loss / num_batches if num_batches > 0 else 0
             rank0_print(f"Epoch {epoch+1} finished. Average training loss: {avg_epoch_loss:.4f}")
@@ -225,11 +235,10 @@ class FSDPFunctionalSAMTrainer(Trainer):
     def second_step_functional(self):
         # Determine the maximum sequence length among the accumulated logit gradients.
         max_seq_len = max(grad.shape[1] for grad in self.accumulated_logit_grads)
-        
+
         # network_fn needed for jvp, could have used autograd grad (maybe should have)
         def network_fn(params, batch):
-            outputs = torch.func.functional_call(self.model, params, (), batch)
-            return outputs.logits
+            return torch.func.functional_call(self.model, params, (), batch).logits
 
         # dictionary of perturbed params needed for jvp
         perturbed_params = {name: param.detach() for name, param in self.model.named_parameters()}
@@ -239,6 +248,12 @@ class FSDPFunctionalSAMTrainer(Trainer):
             for batch, cur_logit_grad in zip(self.accumulated_inputs, self.accumulated_logit_grads):
                 batch_size = batch["input_ids"].shape[0]
                 microbatch_size = 2
+
+                if max_seq_len > 500: # added this to avoid oom - crutch. 
+                    microbatch_size = 1
+                #rank0_print(f"Max Seq Len: {max_seq_len}, Microbatch Size: {microbatch_size}")
+                
+                microbatch_count =  (batch_size + microbatch_size - 1) // microbatch_size
                 
                 # my memory was dying so i had to microbatch, can try other functions
                 for i in range(0, batch_size, microbatch_size):
@@ -266,7 +281,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                             if param is not None:
                                 if param.grad is None:
                                     param.grad = torch.zeros_like(param, device=self.model.device)
-                                param.grad = param.grad + grad.detach()
+                                param.grad = param.grad + grad.detach() / microbatch_count
                         del name, grad
                     del vjp_grads
             
@@ -276,13 +291,12 @@ class FSDPFunctionalSAMTrainer(Trainer):
             v.detach()
             del k, v
 
-        total_microbatches = sum(batch["input_ids"].shape[0] // microbatch_size for batch in self.accumulated_inputs)
-
         # rescale model gradients because we micro batched accumulated gradients
-        for name, param in self.model.named_parameters():
-            if param.grad is not None:
-                param.grad.div_(total_microbatches)
-        del total_microbatches, microbatch_size        
+        #for name, param in self.model.named_parameters():
+        #    if param.grad is not None:
+        #        param.grad.div_(total_microbatches)
+        
+        del microbatch_size        
         del self.accumulated_inputs, self.accumulated_logit_grads
         del perturbed_params, max_seq_len
 
