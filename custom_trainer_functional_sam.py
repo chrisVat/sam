@@ -82,7 +82,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
         global_step = 0
 
         for epoch in range(int(self.args.num_train_epochs)):
-            self.model.train()
+            #self.model.train()
             #rank0_print(f"model training: {self.model.training}")
 
             self.epoch_loss = 0.0
@@ -128,6 +128,9 @@ class FSDPFunctionalSAMTrainer(Trainer):
                         grad.detach()#.cpu()
                         del grad
 
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
                     # reset accumulators
                     self.accumulated_inputs = []
                     self.accumulated_inputs = []
@@ -160,11 +163,20 @@ class FSDPFunctionalSAMTrainer(Trainer):
             if self.args.eval_strategy == "epoch" and self.eval_dataset is not None:
                 print(f"Epoch {epoch+1} finished on rank {dist.get_rank()}. Awaiting evaluation...")
                 if torch.distributed.is_initialized():
+                    gc.collect()
+                    torch.cuda.empty_cache()
                     torch.distributed.barrier()
+                
                 rank0_print("*** Beginning Evaluation ***")
-                eval_results = self.evaluate()
+                with torch.no_grad():
+                    self.model.eval()
+                    eval_results = self.evaluate()
                 
                 self.model.train()
+                
+                gc.collect()
+                torch.cuda.empty_cache()
+                
                 self.log(eval_results)
                 rank0_print(f"Epoch {epoch+1} evaluation results: {eval_results}")
 
