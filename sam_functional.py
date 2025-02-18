@@ -14,6 +14,7 @@ class FunctionalSAM(torch.optim.Optimizer):
         self.kwargs = kwargs
         self.adaptive = False
 
+    # grad norm for normalization
     @torch.no_grad()
     def _grad_norm(self):
         shared_device = self.param_groups[0]["params"][0].device 
@@ -25,6 +26,7 @@ class FunctionalSAM(torch.optim.Optimizer):
         p=2)
         return norm
 
+    # perturb model parameters, store original weights
     @torch.no_grad()
     def first_step_functional(self, zero_grad=False):
         grad_norm = self._grad_norm()
@@ -39,18 +41,7 @@ class FunctionalSAM(torch.optim.Optimizer):
         if zero_grad:
             self.zero_grad()
 
-    @torch.no_grad()
-    def unperturb_functional(self, zero_grad=False):
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                # Restore original weights
-                p.data = self.state[p]["old_p"]
-                del self.state[p]["old_p"]
-        if zero_grad:
-            self.zero_grad()
-    
+    # restore weights, update weights according to stored gradients 
     @torch.no_grad()
     def final_step(self, zero_grad=False):
         for group in self.param_groups:
@@ -65,16 +56,6 @@ class FunctionalSAM(torch.optim.Optimizer):
             self.zero_grad()
 
 
-    # this shouldnt be used
-    @torch.no_grad()
-    def step(self, closure=None):
-        assert False, "Do not use step for now"
-        assert closure is not None, "SAM optimizer requires a closure, but none was provided"
-        closure = torch.enable_grad()(closure)  # ensure gradients are enabled in closure
-        self.first_step(zero_grad=True)
-        closure()
-        self.second_step()
-    
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         self.base_optimizer.param_groups = self.param_groups
