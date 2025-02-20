@@ -112,8 +112,8 @@ class FSDPFunctionalSAMTrainer(Trainer):
 
             for inputs in train_dataloader:                
                 #rank0_print(f"Num Batches: {num_batches}")
-                if num_batches > 50: # testing memory after eval
-                    break
+                #if num_batches > 50: # testing memory after eval
+                #    break
                 
                 #rank0_print(f"Load Inputs - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                 self.get_minibatch_gradients(inputs)

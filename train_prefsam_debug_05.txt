@@ -45,3 +45,76 @@ seed: 42
 *** jdump(unlabeled_data_json_format, unlabeled_data_path) SUCESSFUL to --> res/DEBUG-fsam-0.05-pythia-70m-deduped-100-oneshot-130k_mathinstruct_phi-2_3epochs_512/data/unlabeled.json
 *** Training-Data-Size = 235835
 *** Batch Size = 32
+Using functional SAM - RHO Is . 0.05
+{'pred_loss': 0.4227, 'avg_epoch_loss': 0.4227, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+*** SANITY-CHECK: Training-Sample#1. - TEXT.:
+
+Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+### Instruction:
+The distance between two stars is 6.52 × 10^5 light years. What is the distance between the two stars in parsecs? (1 parsec = 3.26 light years)
+Answer Choices: (A) 2 × 10^5 (B) 4 × 10^6 (C) 5 × 10^7 (D) 7 × 10^7 (E) 9 × 10^8
+
+### Response:Let's think about the multi-choice question.
+6.52 × 10^5 ly / (3.26 ly/parsec) = 2 x 10^5 persec
+The answer is A.</s>
+
+
+*** Using Functional SAM: rho=0.05, adaptive=False
+Using functional SAM - RHO Is . 0.05
+*** Sampler Type: <class 'torch.utils.data.sampler.SequentialSampler'>
+{'pred_loss': 0.4351, 'avg_epoch_loss': 0.4289, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 0.5627, 'avg_epoch_loss': 0.4735, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 0.4306, 'avg_epoch_loss': 0.4306, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.8264, 'avg_epoch_loss': 0.5617, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 0.8144, 'avg_epoch_loss': 0.6122, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 0.423, 'avg_epoch_loss': 0.4268, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.8982, 'avg_epoch_loss': 0.6599, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 0.9708, 'avg_epoch_loss': 0.7043, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 1.0904, 'avg_epoch_loss': 0.7526, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 0.4511, 'avg_epoch_loss': 0.4349, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 1.0377, 'avg_epoch_loss': 0.7843, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 1.1219, 'avg_epoch_loss': 0.818, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 1.0965, 'avg_epoch_loss': 0.8433, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 0.7775, 'avg_epoch_loss': 0.5205, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 1.0045, 'avg_epoch_loss': 0.8568, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 1.2374, 'avg_epoch_loss': 0.886, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 0.968, 'avg_epoch_loss': 0.61, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.9611, 'avg_epoch_loss': 0.8914, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 1.3569, 'avg_epoch_loss': 0.9224, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 0.8031, 'avg_epoch_loss': 0.6422, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 1.0943, 'avg_epoch_loss': 0.9332, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 1.0656, 'avg_epoch_loss': 0.941, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 0.9066, 'avg_epoch_loss': 0.68, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.9479, 'avg_epoch_loss': 0.9414, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 1.1139, 'avg_epoch_loss': 0.9504, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 1.1752, 'avg_epoch_loss': 0.7419, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 1.1674, 'avg_epoch_loss': 0.9613, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 1}
+{'pred_loss': 1.1808, 'avg_epoch_loss': 0.9717, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 0.9341, 'avg_epoch_loss': 0.7633, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 1.0807, 'avg_epoch_loss': 0.9767, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 1.1086, 'avg_epoch_loss': 0.9824, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 0.9701, 'avg_epoch_loss': 0.7839, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 1.0909, 'avg_epoch_loss': 0.987, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 0.9675, 'avg_epoch_loss': 0.9862, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 1.1581, 'avg_epoch_loss': 0.818, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.6433, 'avg_epoch_loss': 0.973, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 1.1937, 'avg_epoch_loss': 0.8493, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.5374, 'avg_epoch_loss': 0.9569, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 1.039, 'avg_epoch_loss': 0.8639, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 1.1585, 'avg_epoch_loss': 0.8849, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.5526, 'avg_epoch_loss': 0.9424, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 1.2572, 'avg_epoch_loss': 0.9097, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.7405, 'avg_epoch_loss': 0.9355, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 1.2649, 'avg_epoch_loss': 0.9319, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.8032, 'avg_epoch_loss': 0.931, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 1.2181, 'avg_epoch_loss': 0.9488, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.9137, 'avg_epoch_loss': 0.9305, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 0.7593, 'avg_epoch_loss': 0.9251, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 1.0668, 'avg_epoch_loss': 0.9553, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.8928, 'avg_epoch_loss': 0.9242, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 1.1577, 'avg_epoch_loss': 0.966, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 0.9507, 'avg_epoch_loss': 0.9249, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 0.9645, 'avg_epoch_loss': 0.9261, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}
+{'pred_loss': 1.1631, 'avg_epoch_loss': 0.9758, 'learning_rate': 2e-05, 'epoch': 0.0, 'rank': 0}
+{'pred_loss': 1.0583, 'avg_epoch_loss': 0.9297, 'learning_rate': 2e-05, 'epoch': 0.01, 'rank': 1}

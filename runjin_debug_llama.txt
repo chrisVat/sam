@@ -1,0 +1,38 @@
+Initialized process group with timeout 16.0 hours.
+Initialized process group with timeout 16.0 hours.
+Configuration loaded!
+full_data_path: TIGER-Lab/MathInstruct
+model_name_or_path: meta-llama/Llama-3.2-1B
+cache_dir: /data2/chris/data/huggingface_models
+model_max_length: 512
+schedule_name: Full
+result_dir_name: runjin-DEBUG-fsam-0.05-llama3.21B_mathinstruct_phi-2_3epochs_512
+sam_mode: prefsam
+sam_rho: 0.05
+sam_adaptive: false
+train_args:
+  optim: adamw_torch
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 8
+  eval_strategy: epoch
+  save_strategy: steps
+  save_steps: 500
+  save_total_limit: 2
+  learning_rate: 2.0e-05
+  weight_decay: 0.0
+  warmup_ratio: 0.0
+  lr_scheduler_type: cosine
+  logging_steps: 1
+  bf16: true
+  tf32: true
+  group_by_length: true
+  full_determinism: true
+  seed: 42
+ref_model_path: null
+n_components: -1
+num_loss_ckpts: -1
+distance: euclidean
+seed: 42
+
