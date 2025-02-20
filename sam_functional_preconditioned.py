@@ -2,11 +2,11 @@ import torch
 
 
 
-class FunctionalSAM(torch.optim.Optimizer):
+class PreconditionedFunctionalSAM(torch.optim.Optimizer):
     def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, **kwargs):
         assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
         defaults = dict(rho=rho, adaptive=adaptive, **kwargs)
-        super(FunctionalSAM, self).__init__(params, defaults)
+        super(PreconditionedFunctionalSAM, self).__init__(params, defaults)
         self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
         self.param_groups = self.base_optimizer.param_groups
         self.defaults.update(self.base_optimizer.defaults)
@@ -28,17 +28,43 @@ class FunctionalSAM(torch.optim.Optimizer):
         return norm
 
     @torch.no_grad()
-    def first_step_functional(self, zero_grad=False, warmup=False): # warmup does nothing here, just so i can reuse files
+    def first_step_functional(self, zero_grad=False, warmup=False):
         grad_norm = self._grad_norm()  # This now stores the grad norm in self.last_grad_norm.
         #perturb_sizes = []
         #grad_sizes = []
+        #preconditioners = []
+        #found_count = 0
+        #not_found_count = 0
         for group in self.param_groups:
             scale = self.rho / (grad_norm + 1e-12)
             for p in group["params"]:
                 if p.grad is None:
                     continue
                 self.state[p]["old_p"] = p.data.clone()
-                e_w = p.grad * scale.to(p)
+                
+                state = self.base_optimizer.state[p]
+                if 'exp_avg_sq' in state and not warmup:
+                    #found_count += 1
+                    preconditioner = (state['exp_avg_sq'].sqrt() + 1e-8).reciprocal()
+                    #preconditioners.append(torch.norm(preconditioner))
+                else:
+                    #not_found_count += 1
+                    preconditioner = torch.ones_like(p.grad)
+
+                
+                """
+                if 'custom_exp_avg_sq' in self.state[p]:
+                    found_count += 1
+                    preconditioner = (self.state[p]['custom_exp_avg_sq'].sqrt() + 1e-3).reciprocal() 
+                    #preconditioners.append(torch.norm(preconditioner))
+                else:
+                    not_found_count += 1
+                    preconditioner = torch.ones_like(p.grad)
+                    self.state[p]['custom_exp_avg_sq'] = torch.ones_like(p.grad)
+                self.state[p]['custom_exp_avg_sq'].mul_(0.9).addcmul_(p.grad, p.grad, value=0.1)
+                """
+
+                e_w = p.grad * scale.to(p) * preconditioner
                 p.add_(e_w) 
         
                 """
@@ -53,18 +79,10 @@ class FunctionalSAM(torch.optim.Optimizer):
         """
         if zero_grad:
             self.zero_grad()
+        #print(f"Found count: {found_count}, Not found count: {not_found_count}")
+        #if len(preconditioners) > 0:
+        #    print(f"Average preconditioner size: {sum(preconditioners) / len(preconditioners)}")
 
-    @torch.no_grad()
-    def unperturb_functional(self, zero_grad=False):
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                # Restore original weights
-                p.data = self.state[p]["old_p"]
-                del self.state[p]["old_p"]
-        if zero_grad:
-            self.zero_grad()
     
     @torch.no_grad()
     def final_step(self, zero_grad=False):

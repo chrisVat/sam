@@ -1,16 +1,15 @@
 import argparse
 import os
 import yaml
+
 from schedules import Full
 from utils import get_tokenizer, smart_tokenizer_and_embedding_resize, get_model, rank0_print
 import torch.distributed as dist
 import datetime
 
-# largely the same as the original s2l repo
-
 
 if not dist.is_initialized():
-    timeout_secs = 28800
+    timeout_secs = 28800*2
     dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=timeout_secs))
     print(f"Initialized process group with timeout {timeout_secs/3600} hours.")
 

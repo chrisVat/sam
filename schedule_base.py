@@ -9,8 +9,7 @@ from sam import SAM
 from custom_trainer_sam import FSDPSAMTrainer
 from custom_trainer_functional_sam import FSDPFunctionalSAMTrainer
 from sam_functional import FunctionalSAM 
-
-# Largely the same schedule_base as from the original S2L Repo
+from sam_functional_preconditioned import PreconditionedFunctionalSAM
 
 class Schedule:
     def __init__(self, 
@@ -36,11 +35,16 @@ class Schedule:
                 self.train_data = json.load(f)
         elif "MathInstruct" in self.full_data_path:
             raw_dataset = load_dataset(self.full_data_path)["train"]
-            #keep_only = 500
+            #keep_only = 502
             #raw_dataset = raw_dataset.select(range(keep_only))
             split_dataset = raw_dataset.train_test_split(test_size=0.1, seed=42)
             train_data = split_dataset["train"]
             val_data = split_dataset["test"]
+            # use keep only for train data and val data
+            #keep_only = 500
+            #train_data = train_data.select(range(keep_only))
+            #val_data = val_data.select(range(keep_only))
+            
             self.train_data = [train_data[i] for i in range(len(train_data))]
             self.val_data = [val_data[i] for i in range(len(val_data))]
             self.train_idx = torch.arange(len(self.train_data))
@@ -161,6 +165,8 @@ class Schedule:
             trainer_cls = FSDPSAMTrainer
         elif self.sam_mode == "prefsam":
             trainer_cls = FSDPFunctionalSAMTrainer
+        elif self.sam_mode == "prefuncsam":
+            trainer_cls = FSDPFunctionalSAMTrainer
         else:
             trainer_cls = Trainer
 
@@ -242,15 +248,15 @@ class Schedule:
                 rho=self.sam_rho,
                 adaptive=self.sam_adaptive)
 
-            """
+        elif self.sam_mode == "prefuncsam":
+            rank0_print(f"*** Using Preconditioned Functional SAM: rho={self.sam_rho}, adaptive={self.sam_adaptive}")
             optimizer = PreconditionedFunctionalSAM(
-                model=self.model,
+                self.model.parameters(),
                 base_optimizer=base_optimizer_fn,
-                lr=lr,
                 rho=self.sam_rho,
-                adaptive=self.sam_adaptive,
+                adaptive=self.sam_adaptive
             )
-            """
+
 
         else:
             rank0_print("*** Using AdamW")

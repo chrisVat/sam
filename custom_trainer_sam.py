@@ -4,6 +4,7 @@ from transformers import Trainer, get_scheduler
 from tqdm.auto import tqdm
 from sam import SAM  
 from sam_functional import FunctionalSAM
+from sam_functional_preconditioned import PreconditionedFunctionalSAM
 from utils import rank0_print
 import torch.distributed as dist
 import datetime
@@ -11,18 +12,19 @@ from torch.utils.data.distributed import DistributedSampler
 import os
 
 
-# Trainer specifically for SAM, also designed with aggregation in mind
+
 class FSDPSAMTrainer(Trainer):
     def __init__(self, *args, sam_mode="no", sam_rho=0.05, sam_adaptive=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.sam_mode = sam_mode
         self.sam_rho = sam_rho
         self.sam_adaptive = sam_adaptive
-        self.accumulated_inputs = []
-        self.global_step = 0
+        self.accumulated_inputs = []  # Store raw mini-batch inputs for accumulation.
+        self.global_step = 0          # Global step counter for logging.
 
 
     def _inner_training_loop(self, *args, **kwargs):
+        # Run an initial evaluation if desired
         eval_results = self.evaluate()
         self.log(eval_results)
         rank0_print(f"Initial evaluation results: {eval_results}")
@@ -35,6 +37,7 @@ class FSDPSAMTrainer(Trainer):
         total_batches = len(train_dataloader)
         total_updates_per_epoch = (total_batches + accum_steps - 1) // accum_steps
 
+        # Create progress bar with rank info
         progress_bar = tqdm(total=total_updates_per_epoch * int(self.args.num_train_epochs),
                             desc=f"Rank {dist.get_rank()} Training")
 
@@ -45,33 +48,36 @@ class FSDPSAMTrainer(Trainer):
             epoch_loss = 0.0
             num_batches = 0
             updates_this_epoch = 0
+
+            # Initialize accumulator for prediction loss
             accumulated_pred_loss = 0.0
 
-            # go over part of minibatch, accumulate inputs 
-            # iterate whole batch first to get a better perturbation
-            # then reiterate on everything in accumualted_inputs with perturbed model
             for inputs in train_dataloader:
                 self.accumulated_inputs.append(inputs)
                 prepared_inputs = self._prepare_inputs(inputs)
                 with self.autocast_smart_context_manager():
                     loss = self.compute_loss(model, prepared_inputs)
                 
+                # Accumulate the unscaled loss for logging
                 accumulated_pred_loss += loss.item()
                 
+                # Scale the loss for backward and update
                 loss = loss / accum_steps
                 self.accelerator.backward(loss)
                 total_loss += loss.item()
                 epoch_loss += loss.item()
                 num_batches += 1
 
+                # When we've reached the accumulation threshold:
                 if len(self.accumulated_inputs) == accum_steps:
-                    grad_norm = self.optimizer._grad_norm() # used just for logging
-                    # perturb model
+                    # Capture gradient norm before applying SAM first step.
+                    grad_norm = self.optimizer._grad_norm()
+
+                    # SAM First Step: perturb weights based on accumulated gradients.
                     self.optimizer.first_step(zero_grad=True)
 
                     sam_loss_sum = 0.0
                     num_accumulated_batches = len(self.accumulated_inputs)
-                    # reiterate examples with perturbed model
                     for batch in self.accumulated_inputs:
                         prepared = self._prepare_inputs(batch)
                         with self.autocast_smart_context_manager():
@@ -79,7 +85,7 @@ class FSDPSAMTrainer(Trainer):
                         self.accelerator.backward(loss_second)
                         sam_loss_sum += loss_second.item()
 
-                    # undo perturabtion, apply new gradients
+                    # SAM Second Step: update weights.
                     self.optimizer.second_step(zero_grad=True)
                     self.accumulated_inputs = []
 
@@ -89,8 +95,10 @@ class FSDPSAMTrainer(Trainer):
                     global_step += 1
                     updates_this_epoch += 1
 
+                    # Compute fractional epoch (e.g., 0.68)
                     epoch_float = epoch + (updates_this_epoch / total_updates_per_epoch)
 
+                    # Build log dictionary
                     logs = {
                         "sam_loss": round(sam_loss_sum / num_accumulated_batches, 4),
                         "pred_loss": round(accumulated_pred_loss / num_accumulated_batches, 4),
@@ -105,11 +113,14 @@ class FSDPSAMTrainer(Trainer):
                     logs['rank'] = dist.get_rank()
                     print(logs)
 
+                    # Reset the accumulated prediction loss for the next accumulation cycle.
                     accumulated_pred_loss = 0.0
 
+                    # Update progress bar (per optimizer update)
                     progress_bar.update(1)
                     progress_bar.set_postfix(logs)
 
+            # Evaluation at epoch end (synchronized with a barrier)
             if self.args.eval_strategy == "epoch" and self.eval_dataset is not None:
                 print(f"Epoch {epoch+1} finished on rank {dist.get_rank()}. Awaiting evaluation...")
                 if torch.distributed.is_initialized():
@@ -141,11 +152,17 @@ class FSDPSAMTrainer(Trainer):
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
                 )
-            elif self.sam_mode == "prefsam": # this is actually not compatible 
+            elif self.sam_mode == "prefsam":
                 self.optimizer = FunctionalSAM(
                     self.model.parameters(),
                     base_optimizer=base_optimizer_fn,
-                    lr=lr,
+                    rho=self.sam_rho,
+                    adaptive=self.sam_adaptive,
+                )
+            elif self.sam_mode == "prefuncsam":
+                self.optimizer = PreconditionedFunctionalSAM(
+                    self.model.parameters(),
+                    base_optimizer=base_optimizer_fn,
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
                 )

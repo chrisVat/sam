@@ -13,8 +13,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModelForSeq2Se
 from torch.utils.data.distributed import DistributedSampler
 from consts import *
 
-# largely the same as the original s2l repo
-
 
 ## ALPACA-STYLE PROMPT: forked from https://github.com/tatsu-lab/stanford_alpaca
 class Prompter(object):
@@ -259,6 +257,9 @@ class SupervisedDataset(Dataset):
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         return dict(input_ids=self.input_ids[i], labels=self.labels[i])
+    
+    def get(self, idx) -> Dict[str, torch.Tensor]:
+        return self.__getitem__(idx)
 
 @dataclass
 class DataCollatorForSupervisedDataset(object):
