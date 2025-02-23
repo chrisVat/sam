@@ -2,3 +2,5 @@
 logs/
 res/
 wandb/
+loss_logs/*
+*.txt

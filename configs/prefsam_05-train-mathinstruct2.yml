@@ -1,9 +1,9 @@
 full_data_path: TIGER-Lab/MathInstruct
-model_name_or_path: meta-llama/Llama-3.2-1B #   microsoft/phi-2 # microsoft/Phi-3-mini-4k-instruct  # path to pretrained foundation llm
+model_name_or_path: microsoft/phi-2 # microsoft/Phi-3-mini-4k-instruct  # path to pretrained foundation llm
 cache_dir: /data2/chris/data/huggingface_models
 model_max_length: 512
 schedule_name: Full
-result_dir_name: runjin-DEBUG-fsam2-0.05-llama3.21B_mathinstruct_phi-2_3epochs_512
+result_dir_name: fsam-0.05-pythia-70m-deduped-100-oneshot-130k_mathinstruct_phi-2_3epochs_512_2
 sam_mode: "prefsam"
 sam_rho: 0.05
 sam_adaptive: false

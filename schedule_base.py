@@ -7,9 +7,12 @@ from utils import jload, jdump, make_supervised_data_module, get_model, rank0_pr
 from sam import SAM
 #from functional_sam import PreconditionedFunctionalSAM
 from custom_trainer_sam import FSDPSAMTrainer
-from custom_trainer_functional_sam import FSDPFunctionalSAMTrainer
+from custom_trainer_functional_sam_memtest import FSDPFunctionalSAMTrainer
 from sam_functional import FunctionalSAM 
 from sam_functional_preconditioned import PreconditionedFunctionalSAM
+# ddp
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 
 class Schedule:
     def __init__(self, 
@@ -41,8 +44,8 @@ class Schedule:
             train_data = split_dataset["train"]
             val_data = split_dataset["test"]
             # use keep only for train data and val data
-            #keep_only = 500
-            #train_data = train_data.select(range(keep_only))
+            #keep_only, keep_only_train = 500, 500
+            #train_data = train_data.select(range(keep_only_train))
             #val_data = val_data.select(range(keep_only))
             
             self.train_data = [train_data[i] for i in range(len(train_data))]
@@ -185,6 +188,13 @@ class Schedule:
         #print(self.model)
         #exit()
 
+        self.training_args.remove_unused_columns = False
+
+        local_rank = torch.distributed.get_rank()
+        self.model.to(local_rank)
+        if torch.distributed.get_world_size() > 1:
+            self.model = DDP(self.model, device_ids=[local_rank], output_device=local_rank)
+
 
         if self.sam_mode == "no":
             trainer = trainer_cls(
@@ -214,7 +224,8 @@ class Schedule:
         trainer.train()
         trainer.save_state()
         trainer.save_model(output_dir=output_dir)
-        self.model.save_pretrained(f"{output_dir}/pretrained")
+        #self.model.save_pretrained(f"{output_dir}/pretrained")
+        self.model.module.save_pretrained(f"{output_dir}/pretrained")
 
     def _create_optimizer_and_scheduler(self, train_dataset):
         lr = self.training_args.learning_rate

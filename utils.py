@@ -222,8 +222,8 @@ class SupervisedDataset(Dataset):
                     continue
         elif 'MathInstruct' in data_path:
             list_data_dict = load_dataset(data_path)["train"]  # fixed -> for indexing all samples
-            #keep_only = 500
-            #list_data_dict = [list_data_dict[i] for i in range(keep_only)]
+            #keep_only, keep_only_train = 500, 500
+            #list_data_dict = [list_data_dict[i] for i in range(keep_only_train)]
             
             self.train_data = [list_data_dict[i] for i in range(len(list_data_dict))]
         elif 'Asclepius' in data_path:
@@ -251,15 +251,24 @@ class SupervisedDataset(Dataset):
         data_dict = preprocess(sources, targets, tokenizer)
         self.input_ids = data_dict["input_ids"]
         self.labels = data_dict["labels"]
+        self.ids = list(range(len(self.input_ids)))  # Ensure unique IDs are stored
+        self.ids = torch.tensor(self.ids, dtype=torch.long)
 
     def __len__(self):
         return len(self.input_ids)
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        return dict(input_ids=self.input_ids[i], labels=self.labels[i])
+        #print("getitem called for id: ", self.ids[i])
+        #print(type(self.input_ids[i]), type(self.labels[i]), type(self.ids[i]))
+        
+        return {
+            "input_ids": self.input_ids[i], 
+            "labels": self.labels[i], 
+            "id": self.ids[i],  # Ensure 'id' is a tensor
+        }
     
-    def get(self, idx) -> Dict[str, torch.Tensor]:
-        return self.__getitem__(idx)
+    #def get(self, idx) -> Dict[str, torch.Tensor]:
+    #    return self.__getitem__(idx)
 
 @dataclass
 class DataCollatorForSupervisedDataset(object):
@@ -267,7 +276,10 @@ class DataCollatorForSupervisedDataset(object):
     tokenizer: transformers.PreTrainedTokenizer
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        #print("collator claled with instances: ", instances[0].keys())
         input_ids, labels = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels"))
+        ids = [instance["id"] for instance in instances]
+        
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
         )
@@ -276,6 +288,7 @@ class DataCollatorForSupervisedDataset(object):
             input_ids=input_ids,
             labels=labels,
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
+            id=torch.tensor(ids, dtype=torch.long),
         )
 
 def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, data_path) -> Dict:

@@ -15,6 +15,33 @@ class FunctionalSAM(torch.optim.Optimizer):
         self.kwargs = kwargs
         self.adaptive = False
         print("Using functional SAM - RHO Is .", self.rho)
+        self.has_preallocated = False
+        self.memory_efficient = True
+
+    @torch.no_grad()
+    def _preallocate_model(self):
+        for group in self.param_groups:
+            for p in group["params"]:
+                self.state[p]["old_p"] = torch.empty_like(p.data, device=p.device)
+                self.state[p]["old_p"].copy_(p.data)
+        self.has_preallocated = True
+
+
+    @torch.no_grad()
+    def move_old_to_cpu(self):
+        for group in self.param_groups:
+            for p in group["params"]:
+                self.state[p]["old_p"] = self.state[p]["old_p"].cpu()
+        self.has_preallocated = False
+
+
+    @torch.no_grad()
+    def move_old_to_gpu(self):
+        for group in self.param_groups:
+            for p in group["params"]:
+                self.state[p]["old_p"] = self.state[p]["old_p"].cuda()
+        self.has_preallocated = True
+
 
     @torch.no_grad()
     def _grad_norm(self):
@@ -30,6 +57,9 @@ class FunctionalSAM(torch.optim.Optimizer):
     @torch.no_grad()
     def first_step_functional(self, zero_grad=False, warmup=False): # warmup does nothing here, just so i can reuse files
         grad_norm = self._grad_norm()  # This now stores the grad norm in self.last_grad_norm.
+        if not self.has_preallocated:
+            self._preallocate_model()
+        
         #perturb_sizes = []
         #grad_sizes = []
         for group in self.param_groups:
@@ -37,7 +67,7 @@ class FunctionalSAM(torch.optim.Optimizer):
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                self.state[p]["old_p"] = p.data.clone()
+                self.state[p]["old_p"].copy_(p.data) # .clone()
                 e_w = p.grad * scale.to(p)
                 p.add_(e_w) 
         
@@ -61,8 +91,10 @@ class FunctionalSAM(torch.optim.Optimizer):
                 if p.grad is None:
                     continue
                 # Restore original weights
-                p.data = self.state[p]["old_p"]
-                del self.state[p]["old_p"]
+                #p.data = self.state[p]["old_p"]
+                p.data.copy_(self.state[p]["old_p"])
+
+                #del self.state[p]["old_p"]
         if zero_grad:
             self.zero_grad()
     
@@ -73,8 +105,11 @@ class FunctionalSAM(torch.optim.Optimizer):
                 if p.grad is None:
                     continue
                 # Restore original weights
-                p.data = self.state[p]["old_p"]
-                del self.state[p]["old_p"]
+                #p.data = self.state[p]["old_p"]
+                p.data.copy_(self.state[p]["old_p"])
+
+                #del self.state[p]["old_p"]
+        
         self.base_optimizer.step()  # update weights using the second gradient
         if zero_grad:
             self.zero_grad()
