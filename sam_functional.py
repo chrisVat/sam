@@ -27,6 +27,22 @@ class FunctionalSAM(torch.optim.Optimizer):
         self.has_preallocated = True
 
 
+    def move_optimizer_to_cpu(self):
+        for param in self.base_optimizer.state:
+            state = self.base_optimizer.state[param]
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    state[key] = value.cpu()
+
+
+    def move_optimizer_to_gpu(self):
+        for param in self.base_optimizer.state:
+            state = self.base_optimizer.state[param]
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    state[key] = value.cuda()
+
+
     @torch.no_grad()
     def move_old_to_cpu(self):
         for group in self.param_groups:
@@ -106,7 +122,7 @@ class FunctionalSAM(torch.optim.Optimizer):
                     continue
                 # Restore original weights
                 #p.data = self.state[p]["old_p"]
-                p.data.copy_(self.state[p]["old_p"])
+                p.data.copy_(self.state[p]["old_p"].cuda())
 
                 #del self.state[p]["old_p"]
         

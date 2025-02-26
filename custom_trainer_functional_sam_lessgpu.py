@@ -19,6 +19,8 @@ import inspect
 
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 
+import contextlib
+
 
 LOG_PRED_LOSS = False
 LOG_FOLDER = "loss_logs/"
@@ -46,10 +48,18 @@ class FSDPFunctionalSAMTrainer(Trainer):
         #print(kwargs['args'].run_name)
         #exit()
 
+        if not hasattr(self.model, "no_sync"): # not the best practices, i just want this to work quickly.
+            self.model.no_sync = contextlib.nullcontext
+
         gpu_rank = dist.get_rank() if dist.is_initialized() else 0
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = f"training_log_rank{gpu_rank}_{kwargs['args'].run_name.replace("/", "")}_{timestamp}.txt"
         self.log_file_path = os.path.join(LOG_FOLDER, log_filename)
+        
+        # non ddp
+        #self.model.gradient_checkpointing_enable()
+        # ddp
+        #self.model.module.gradient_checkpointing_enable()
 
 
     def get_param_loss(self, logits, labels):
@@ -89,15 +99,21 @@ class FSDPFunctionalSAMTrainer(Trainer):
 
         with self.autocast_smart_context_manager():
             outputs = self.model(**prepared_inputs, return_dict=True)
-            logits = outputs.logits
-            #parameter_loss_og = outputs.loss
-            #param_loss_v1 = self.get_param_loss(logits, labels)
-            #param_loss_v2 = self.get_param_loss_v2(logits, labels)
             parameter_loss = self.my_label_smoother(outputs, labels, shift_labels=True)
-            #rank0_print(f"Parameter loss smoothed: {parameter_loss}")
-            #exit()
+            outputs = {key: value.cpu() if isinstance(value, torch.Tensor) else value for key, value in outputs.items()}
 
-            # move outputs to cpu
+        parameter_loss = parameter_loss / self.accum_steps
+
+        self.accelerator.backward(parameter_loss)
+        self.total_loss = self.total_loss + parameter_loss.item() 
+        self.accumulated_pred_loss = self.accumulated_pred_loss + parameter_loss.item()
+
+        del outputs, parameter_loss
+        
+        with self.autocast_smart_context_manager():
+            outputs = self.model(**prepared_inputs, return_dict=True)
+            logits = outputs.logits
+            parameter_loss = self.my_label_smoother(outputs, labels, shift_labels=True)
             outputs = {key: value.cpu() if isinstance(value, torch.Tensor) else value for key, value in outputs.items()}
 
         parameter_loss = parameter_loss / self.accum_steps
@@ -105,20 +121,12 @@ class FSDPFunctionalSAMTrainer(Trainer):
         logit_grad = torch.autograd.grad(
             outputs=parameter_loss,
             inputs=logits,
-            retain_graph=True, 
+            retain_graph=False, 
             allow_unused=True,
         )[0].detach().cpu()
 
-        self.accelerator.backward(parameter_loss)
-
-        #logit_grad = logit_grad.detach() 
 
         self.accumulated_logit_grads.append(logit_grad) 
-
-        self.total_loss = self.total_loss + parameter_loss.item() 
-        self.accumulated_pred_loss = self.accumulated_pred_loss + parameter_loss.item()
-
-        # Create and append log entry
 
         if LOG_PRED_LOSS:        
             sample_ids = inputs["id"].tolist()
@@ -201,11 +209,14 @@ class FSDPFunctionalSAMTrainer(Trainer):
                 #    break
                 
                 rank0_print(f"Getting Minibatch - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                
                 with self.model.no_sync():
                     self.get_minibatch_gradients(inputs)
                 rank0_print(f"Post Computing Minibatch Gradients - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
             
                 if len(self.accumulated_inputs) == accum_steps:
+                    
+
                     with self.model.no_sync():
                         #rank0_print(f"Data sequence lengths: {self.accumulated_inputs[0]['input_ids'].shape[1]} ")
                         #rank0_print(f"Grad norm after minibatch accumulation: {model_grad_l2_norm(self.model)}")
@@ -215,6 +226,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                         rank0_print(f"Post Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         #rank0_print(f"Grad norm after first step model: {model_grad_l2_norm(self.model)}")
                         self.optimizer.move_old_to_cpu()
+                        self.optimizer.move_optimizer_to_cpu()
                         rank0_print("Moved Old Model to CPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         #time.sleep(0.5)
                         rank0_print("Calling Second Step Functional - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
@@ -231,14 +243,19 @@ class FSDPFunctionalSAMTrainer(Trainer):
                             dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
                             p.grad /= dist.get_world_size()
 
-                    # print(f"Rank {dist.get_rank()} total grad norm: {model_grad_l2_norm(self.model)}")
+                    rank0_print(f"Post All Reduce - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
+                    # print(f"Rank {dist.get_rank()} total grad norm: {model_grad_l2_norm(self.model)}")
                     
+                    self.optimizer.move_optimizer_to_gpu()
+                    rank0_print(f"Post Move Optimizer to GPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+
                     self.optimizer.final_step()
                     rank0_print(f"AFterFinal Step - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
                     self.model.zero_grad()
                     self.optimizer.zero_grad()
+                    rank0_print(f"After Zeroing gradients GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
                     #rank0_print(f"After Zeroing gradients GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
@@ -275,6 +292,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     if self.state.global_step % self.args.save_steps == 0:
                         if dist.get_rank() == 0:
                             print("Saving model checkpoint at global step: ", self.state.global_step)
+                            
                             with self.model.no_sync():
                                 self._save_checkpoint(self.model, trial=None)
                         else:
@@ -365,36 +383,10 @@ class FSDPFunctionalSAMTrainer(Trainer):
 
             perturbed_params = {name: param for name, param in self.model.named_parameters()}
 
-            #if self.vjp_preallocated is None:
-            #    self.vjp_preallocated = {name: torch.empty_like(param) for name, param in dict(self.model.named_parameters()).items()}
-            #else:
-                # move to gpu
-            #    for name, param in self.vjp_preallocated.items():
-            #        self.vjp_preallocated[name] = param.to(self.model.device)
-            #"""
             def compute_vjp_grads(microbatch, cur_avg_logit_grad):
                 vjp_fn = torch.func.vjp(lambda theta: network_fn(theta, microbatch), perturbed_params)[1]
                 return vjp_fn(cur_avg_logit_grad)[0]
-            #"""
-            """
-            def compute_vjp_grads(microbatch, cur_avg_logit_grad):
-                vjp_fn = torch.func.vjp(lambda theta: network_fn(theta, microbatch), perturbed_params)[1]
-                computed_grads = vjp_fn(cur_avg_logit_grad)[0]
-                if self.vjp_preallocated is not None:
-                    # Fill preallocated buffers in-place.
-                    for key, grad in computed_grads.items():
-                        if grad is not None:
-                            self.vjp_preallocated[key].copy_(grad)
-                        else:
-                            self.vjp_preallocated[key].zero_()
-                            computed_grads[key].zero_()
-                            # computed_grads[key] = computed_grads[key].cpu()
-                    #del computed_grads, vjp_fn
-                    return self.vjp_preallocated
-                    #return self.vjp_preallocated
-                #else:
-                #    return computed_grads
-            """
+
             def accumulate_gradients(vjp_gradient, microbatch_count):
                 model_params = dict(self.model.named_parameters())
                 for name, grad in vjp_gradient.items():
@@ -415,24 +407,27 @@ class FSDPFunctionalSAMTrainer(Trainer):
                 next_best = batch_size // 2
                 next_best = 1
                 microbatch_size = batch_size if max_seq_len <= 200 else max(next_best, 1)
+                microbatch_size = 1
                 #microbatch_size = 1
                 microbatch_count = (batch_size + microbatch_size - 1) // microbatch_size
 
                 # Process the batch in microbatches.
                 for i in range(0, batch_size, microbatch_size):
                     #print(f"GPU {dist.get_rank()} Minibatch: ", i)
-                    #rank0_print(f"GPU {dist.get_rank()} Minibatch: {i}")
+                    rank0_print(f"\tSecond Step Gettign Microbatch: {i} - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                     # Slice the microbatch from the CPU batch and move it to GPU.
                     microbatch = {
                         k: v[i:i+microbatch_size].detach().to(self.model.device)
                         for k, v in batch_cpu.items()
                     }
+                    rank0_print(f"\tSecond Step After Moving Microbatch to GPU: {i} - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                     seq_len = microbatch["input_ids"].shape[1]
                     # Select and move the corresponding slice of the logit gradients.
                     cur_avg_logit_grad = (
                         cur_logit_grad[i:i+microbatch_size, :seq_len]
                         .contiguous().detach().to(self.model.device)
                     )
+                    rank0_print(f"\tSecond Step After Moving Logit Grad to GPU: {i} - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
                     # Compute the vjp gradients for this microbatch.
                     #vjp_grads = compute_vjp_grads(microbatch, cur_avg_logit_grad)
@@ -441,6 +436,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     #rank0_print(f"After compute vjp grads - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                     # Accumulate gradients in-place.
                     accumulate_gradients(compute_vjp_grads(microbatch, cur_avg_logit_grad), microbatch_count)
+                    rank0_print(f"\tSecond Step After Accumulate Gradients - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                     #rank0_print(f"After accumulate gradients - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
                     # move back to cpu
@@ -450,6 +446,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     del microbatch
                     #cur_avg_logit_grad = cur_avg_logit_grad.cpu()
                     del cur_avg_logit_grad
+                    rank0_print(f"\tSecond Step After Moving Microbatch to CPU: {i} - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                 del batch_cpu, cur_logit_grad
 
             # move everything to cpu

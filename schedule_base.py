@@ -7,7 +7,7 @@ from utils import jload, jdump, make_supervised_data_module, get_model, rank0_pr
 from sam import SAM
 #from functional_sam import PreconditionedFunctionalSAM
 from custom_trainer_sam import FSDPSAMTrainer
-from custom_trainer_functional_sam_memtest import FSDPFunctionalSAMTrainer
+from custom_trainer_functional_sam_lessgpu import FSDPFunctionalSAMTrainer
 from sam_functional import FunctionalSAM 
 from sam_functional_preconditioned import PreconditionedFunctionalSAM
 # ddp
@@ -44,9 +44,9 @@ class Schedule:
             train_data = split_dataset["train"]
             val_data = split_dataset["test"]
             # use keep only for train data and val data
-            #keep_only, keep_only_train = 500, 250
-            #train_data = train_data.select(range(keep_only_train))
-            #val_data = val_data.select(range(keep_only))
+            keep_only, keep_only_train = 500, 250
+            train_data = train_data.select(range(keep_only_train))
+            val_data = val_data.select(range(keep_only))
             
             self.train_data = [train_data[i] for i in range(len(train_data))]
             self.val_data = [val_data[i] for i in range(len(val_data))]
