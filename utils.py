@@ -225,8 +225,8 @@ class SupervisedDataset(Dataset):
                     continue
         elif 'MathInstruct' in data_path:
             list_data_dict = load_dataset(data_path)["train"]  # fixed -> for indexing all samples
-            #keep_only, keep_only_train = 500, 500
-            #list_data_dict = [list_data_dict[i] for i in range(keep_only_train)]
+            keep_only, keep_only_train = 500, 250
+            list_data_dict = [list_data_dict[i] for i in range(keep_only_train)]
             
             self.train_data = [list_data_dict[i] for i in range(len(list_data_dict))]
         elif 'Asclepius' in data_path:
@@ -344,8 +344,8 @@ def get_model(model_name_or_path, cache_dir=None):
     else:
         # get statedict
         #state_dict = torch.load(model_name_or_path, map_location="cpu")
-        #model = AutoModelForCausalLM.from_pretrained(model_name_or_path, cache_dir=cache_dir)
-        model = load_ddp_checkpoint(model_name_or_path, cache_dir=cache_dir)
+        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, cache_dir=cache_dir)
+        #model = load_ddp_checkpoint(model_name_or_path, cache_dir=cache_dir)
     
     
     return model

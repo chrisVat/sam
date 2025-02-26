@@ -15,25 +15,20 @@ import datetime
 import os
 from consts import LLAMA_IGNORE_INDEX
 import numpy as np
+import inspect
 
-from transformers.trainer_callback import ExportableState, has_length
-from transformers.modeling_utils import unwrap_model
-from transformers.integrations.deepspeed import deepspeed_init
-from transformers.trainer_pt_utils import EvalLoopContainer, find_batch_size, IterableDatasetShard, nested_detach
-from transformers.trainer_utils import denumpify_detensorize, EvalLoopOutput, EvalPrediction
-from transformers.utils import is_torch_xla_available, is_sagemaker_mp_enabled
+from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 
-if is_sagemaker_mp_enabled():
-    from transformers.trainer_pt_utils import smp_forward_only, smp_nested_concat
 
-LOG_PRED_LOSS = True
+LOG_PRED_LOSS = False
 LOG_FOLDER = "loss_logs/"
 
 if not os.path.exists(LOG_FOLDER):
     os.makedirs(LOG_FOLDER)
 
 
- # 2,3 for retraining for 05
+def _is_peft_model(model):
+    return False
 
 class FSDPFunctionalSAMTrainer(Trainer):
     def __init__(self, *args, sam_mode="no", sam_rho=0.05, sam_adaptive=False, **kwargs):
@@ -41,7 +36,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
         self.sam_mode = sam_mode
         self.sam_rho = sam_rho
         self.sam_adaptive = sam_adaptive
-        self.label_smoother = LabelSmoother(epsilon=self.args.label_smoothing_factor)
+        self.my_label_smoother = LabelSmoother(epsilon=self.args.label_smoothing_factor, ignore_index=LLAMA_IGNORE_INDEX)
         self.global_step = 0 
         self.vjp_preallocated = None
 
@@ -57,6 +52,33 @@ class FSDPFunctionalSAMTrainer(Trainer):
         self.log_file_path = os.path.join(LOG_FOLDER, log_filename)
 
 
+    def get_param_loss(self, logits, labels):
+        # Shift logits and labels so that each prediction corresponds to the next token.
+        shifted_logits = logits[:, :-1, :].contiguous()
+        shifted_labels = labels[:, 1:].contiguous()
+
+        loss_fn = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
+        per_token_loss = loss_fn(
+            shifted_logits.view(-1, shifted_logits.size(-1)),
+            shifted_labels.view(-1)
+        )
+        per_token_loss = per_token_loss.view(shifted_labels.shape)
+        
+        valid_mask = shifted_labels != -100
+        return per_token_loss.sum() / valid_mask.sum()
+
+    def get_param_loss_v2(self, logits, labels):
+        shifted_logits = logits[:, :-1, :].contiguous()
+        shifted_labels = labels[:, 1:].contiguous()
+
+        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+        loss = loss_fn(
+            shifted_logits.view(-1, shifted_logits.size(-1)),
+            shifted_labels.view(-1)
+        )
+        return loss
+
+
     def get_minibatch_gradients(self, inputs):
         #rank0_print(f"Getting minibatch - Allocated: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
         prepared_inputs = self._prepare_inputs(inputs)
@@ -66,22 +88,14 @@ class FSDPFunctionalSAMTrainer(Trainer):
         labels = prepared_inputs.get("labels")
 
         with self.autocast_smart_context_manager():
-            outputs = self.model(**prepared_inputs)
+            outputs = self.model(**prepared_inputs, return_dict=True)
             logits = outputs.logits
-            parameter_loss = self.label_smoother(outputs, labels, shift_labels=True)
-
-            """
-            # check batchsize
-            with torch.no_grad():
-                if logits.shape[0] != 1:
-                    #parameter_loss_individual = []
-                    parameter_loss_individual = [self.label_smoother({"logits": logits[i].unsqueeze(0)}, labels[i].unsqueeze(0), shift_labels=True).detach().cpu().numpy() 
-                                                 for i in range(logits.shape[0])]
-                    
-                    parameter_loss_individual = np.array([val for val in parameter_loss_individual])
-                else:
-                    parameter_loss_individual = np.array([parameter_loss.detach().cpu().numpy()])
-            """
+            #parameter_loss_og = outputs.loss
+            #param_loss_v1 = self.get_param_loss(logits, labels)
+            #param_loss_v2 = self.get_param_loss_v2(logits, labels)
+            parameter_loss = self.my_label_smoother(outputs, labels, shift_labels=True)
+            #rank0_print(f"Parameter loss smoothed: {parameter_loss}")
+            #exit()
 
             # move outputs to cpu
             outputs = {key: value.cpu() if isinstance(value, torch.Tensor) else value for key, value in outputs.items()}

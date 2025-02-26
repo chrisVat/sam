@@ -70,7 +70,6 @@ def plot_small_percentiles(sam_losses, default_losses, steps):
             sam_percentiles.append(np.percentile(cur_sam, percentile))
             default_percentiles.append(np.percentile(cur_default, percentile))
 
-        #plot it
         plt.plot(percentiles, sam_percentiles, label="SAM")
         plt.plot(percentiles, default_percentiles, label="AdamW")
         plt.title(f"Checkpoint {step} Loss Percentiles")
