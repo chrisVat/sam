@@ -12,6 +12,9 @@ import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModelForSeq2SeqLM
 from torch.utils.data.distributed import DistributedSampler
 from consts import *
+from collections import OrderedDict
+from safetensors.torch import load_file
+import warnings
 
 
 ## ALPACA-STYLE PROMPT: forked from https://github.com/tatsu-lab/stanford_alpaca
@@ -311,12 +314,40 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, dat
     return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
 
 
+def load_ddp_checkpoint(model_name_or_path, cache_dir=None):
+    # Load the safetensor shards
+    checkpoint_files = [os.path.join(model_name_or_path, f) for f in os.listdir(model_name_or_path) if f.endswith(".safetensors")]
+    checkpoint_files.sort()
+    state_dict = {}
+    for ckpt in checkpoint_files:
+        print(f"Loading {ckpt}...")
+        shard = load_file(ckpt)
+        state_dict.update(shard) 
+
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        new_key = k.replace("module.", "") 
+        new_state_dict[new_key] = v
+
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+    model = AutoModelForCausalLM.from_pretrained(model_name_or_path, cache_dir=cache_dir)
+    logging.getLogger("transformers").setLevel(logging.WARNING)
+    print("Loading from state dict...")
+    model.load_state_dict(new_state_dict, strict=True)
+    return model
+
+
 ## GET LLAMA-MODEL
 def get_model(model_name_or_path, cache_dir=None):
     if "t5" in model_name_or_path:
         model = AutoModelForSeq2SeqLM.from_pretrained(model_name_or_path, cache_dir=cache_dir)
     else:
-        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, cache_dir=cache_dir)
+        # get statedict
+        #state_dict = torch.load(model_name_or_path, map_location="cpu")
+        #model = AutoModelForCausalLM.from_pretrained(model_name_or_path, cache_dir=cache_dir)
+        model = load_ddp_checkpoint(model_name_or_path, cache_dir=cache_dir)
+    
+    
     return model
 
 
