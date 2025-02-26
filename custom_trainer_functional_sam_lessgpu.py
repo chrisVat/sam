@@ -220,6 +220,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     with self.model.no_sync():
                         #rank0_print(f"Data sequence lengths: {self.accumulated_inputs[0]['input_ids'].shape[1]} ")
                         #rank0_print(f"Grad norm after minibatch accumulation: {model_grad_l2_norm(self.model)}")
+                        self.optimizer.move_adamw_second_moment_to_cpu()
                         rank0_print(f"Pre Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         self.optimizer.first_step_functional(zero_grad=True) # , warmup=global_step<=MIN_WARMUP_STEPS)
                         #rank0_print(f"First Step Function - GPU Memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
@@ -246,7 +247,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     rank0_print(f"Post All Reduce - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
                     # print(f"Rank {dist.get_rank()} total grad norm: {model_grad_l2_norm(self.model)}")
-                    
+                    self.optimizer.move_adamw_second_moment_to_gpu()
                     self.optimizer.move_optimizer_to_gpu()
                     rank0_print(f"Post Move Optimizer to GPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 

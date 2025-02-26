@@ -50,6 +50,21 @@ class FunctionalSAM(torch.optim.Optimizer):
                 self.state[p]["old_p"] = self.state[p]["old_p"].cpu()
         self.has_preallocated = False
 
+    @torch.no_grad()
+    def move_adamw_second_moment_to_cpu(self):
+        for param in self.base_optimizer.state:
+            state = self.base_optimizer.state[param]
+            # exp_avg_sq
+            if "exp_avg_sq" in state:
+                state["exp_avg_sq"] = state["exp_avg_sq"].cpu()
+
+    @torch.no_grad()
+    def move_adamw_second_moment_to_gpu(self):
+        for param in self.base_optimizer.state:
+            state = self.base_optimizer.state[param]
+            # exp_avg_sq
+            if "exp_avg_sq" in state:
+                state["exp_avg_sq"] = state["exp_avg_sq"].cuda()
 
     @torch.no_grad()
     def move_old_to_gpu(self):
