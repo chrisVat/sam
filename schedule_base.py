@@ -7,7 +7,7 @@ from utils import jload, jdump, make_supervised_data_module, get_model, rank0_pr
 from sam import SAM
 #from functional_sam import PreconditionedFunctionalSAM
 from custom_trainer_sam import FSDPSAMTrainer
-from custom_trainer_functional_sam_lessgpu import FSDPFunctionalSAMTrainer
+from custom_trainer_functional_sam_memtest import FSDPFunctionalSAMTrainer
 from sam_functional import FunctionalSAM 
 from sam_functional_preconditioned import PreconditionedFunctionalSAM
 # ddp
@@ -38,15 +38,17 @@ class Schedule:
                 self.train_data = json.load(f)
         elif "MathInstruct" in self.full_data_path:
             raw_dataset = load_dataset(self.full_data_path)["train"]
-            #keep_only = 502
-            #raw_dataset = raw_dataset.select(range(keep_only))
-            split_dataset = raw_dataset.train_test_split(test_size=0.1, seed=42)
+            #dataset_shuffled = raw_dataset.shuffle(seed=42)
+            #train_num = int(len(dataset_shuffled) * 0.95)
+            #train_data = dataset_shuffled.select(range(train_num))
+            #val_data = dataset_shuffled.select(range(train_num, len(dataset_shuffled)))
+            split_dataset = raw_dataset.train_test_split(test_size=0.05, seed=42)
             train_data = split_dataset["train"]
             val_data = split_dataset["test"]
             # use keep only for train data and val data
-            keep_only, keep_only_train = 500, 250
-            train_data = train_data.select(range(keep_only_train))
-            val_data = val_data.select(range(keep_only))
+            #keep_only, keep_only_train = 500, 250
+            #train_data = train_data.select(range(keep_only_train))
+            #val_data = val_data.select(range(keep_only))
             
             self.train_data = [train_data[i] for i in range(len(train_data))]
             self.val_data = [val_data[i] for i in range(len(val_data))]

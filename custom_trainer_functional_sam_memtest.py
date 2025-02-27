@@ -16,6 +16,7 @@ import os
 from consts import LLAMA_IGNORE_INDEX
 import numpy as np
 import inspect
+import contextlib
 
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 
@@ -39,6 +40,9 @@ class FSDPFunctionalSAMTrainer(Trainer):
         self.my_label_smoother = LabelSmoother(epsilon=self.args.label_smoothing_factor, ignore_index=LLAMA_IGNORE_INDEX)
         self.global_step = 0 
         self.vjp_preallocated = None
+
+        if not hasattr(self.model, "no_sync"): # not the best practices, i just want this to work quickly.
+            self.model.no_sync = contextlib.nullcontext
 
         #print(kwargs)
         #print(type(kwargs))
@@ -156,6 +160,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
         self.model.train() 
         train_dataloader = self.get_train_dataloader()
         print("Train Dataloader", train_dataloader)
+        print("train loader length: ", len(train_dataloader))
 
         accum_steps = (
             self.args.gradient_accumulation_steps
@@ -200,26 +205,26 @@ class FSDPFunctionalSAMTrainer(Trainer):
                 #if num_batches > 50: # testing memory after eval
                 #    break
                 
-                rank0_print(f"Getting Minibatch - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                #rank0_print(f"Getting Minibatch - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                 with self.model.no_sync():
                     self.get_minibatch_gradients(inputs)
-                rank0_print(f"Post Computing Minibatch Gradients - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                #rank0_print(f"Post Computing Minibatch Gradients - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
             
                 if len(self.accumulated_inputs) == accum_steps:
                     with self.model.no_sync():
                         #rank0_print(f"Data sequence lengths: {self.accumulated_inputs[0]['input_ids'].shape[1]} ")
                         #rank0_print(f"Grad norm after minibatch accumulation: {model_grad_l2_norm(self.model)}")
-                        rank0_print(f"Pre Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                        #rank0_print(f"Pre Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         self.optimizer.first_step_functional(zero_grad=True) # , warmup=global_step<=MIN_WARMUP_STEPS)
                         #rank0_print(f"First Step Function - GPU Memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
-                        rank0_print(f"Post Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                        #rank0_print(f"Post Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         #rank0_print(f"Grad norm after first step model: {model_grad_l2_norm(self.model)}")
                         self.optimizer.move_old_to_cpu()
-                        rank0_print("Moved Old Model to CPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                        #rank0_print("Moved Old Model to CPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         #time.sleep(0.5)
-                        rank0_print("Calling Second Step Functional - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                        #rank0_print("Calling Second Step Functional - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         self.second_step_functional() 
-                        rank0_print(f"Post Second Step Functional - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                        #rank0_print(f"Post Second Step Functional - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         #self.optimizer.move_old_to_gpu()             
                         time.sleep(0.5)
                         #rank0_print(f"Grad norm after second step: {model_grad_l2_norm(self.model)}")
@@ -235,7 +240,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
 
                     
                     self.optimizer.final_step()
-                    rank0_print(f"AFterFinal Step - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                    #rank0_print(f"AFterFinal Step - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
                     self.model.zero_grad()
                     self.optimizer.zero_grad()
