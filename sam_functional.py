@@ -130,14 +130,17 @@ class FunctionalSAM(torch.optim.Optimizer):
             self.zero_grad()
     
     @torch.no_grad()
-    def final_step(self, zero_grad=False):
+    def final_step(self, zero_grad=False, combined=False):
         for group in self.param_groups:
             for p in group["params"]:
                 if p.grad is None:
                     continue
                 # Restore original weights
                 #p.data = self.state[p]["old_p"]
-                p.data.copy_(self.state[p]["old_p"].cuda())
+                if combined:
+                    p.data.copy_(self.state[p]["old_p"].cuda())
+                else:
+                    p.data.copy_(self.state[p]["old_p"])
 
                 #del self.state[p]["old_p"]
         

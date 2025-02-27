@@ -251,7 +251,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     self.optimizer.move_optimizer_to_gpu()
                     rank0_print(f"Post Move Optimizer to GPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
-                    self.optimizer.final_step()
+                    self.optimizer.final_step(combined=True)
                     rank0_print(f"AFterFinal Step - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
                     self.model.zero_grad()
