@@ -226,8 +226,10 @@ class SupervisedDataset(Dataset):
         elif 'MathInstruct' in data_path:
             list_data_dict = load_dataset(data_path)["train"]  # fixed -> for indexing all samples
 
-            split_dataset = list_data_dict.train_test_split(test_size=0.05, seed=42)
-            list_data_dict = split_dataset["train"]
+            list_data_dict = list_data_dict.shuffle(seed=42)
+            train_num = int(len(list_data_dict)*0.95)
+            list_data_dict = list_data_dict.select(range(train_num))
+
             #val_data = split_dataset["test"]
 
             #keep_only, keep_only_train = 500, 250

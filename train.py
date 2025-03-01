@@ -9,6 +9,12 @@ import datetime
 import torch
 
 
+ESTABLISH_KILLSWITCH = False
+if ESTABLISH_KILLSWITCH:
+    from killswitch import setup_killswitch
+    setup_killswitch()
+
+
 if not dist.is_initialized():
     timeout_secs = 28800*2
     dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=timeout_secs))

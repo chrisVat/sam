@@ -23,18 +23,6 @@ class FSDPSAMTrainer(Trainer):
         self.global_step = 0          # Global step counter for logging.
 
 
-    def get_param_loss(self, logits, labels):
-        shifted_logits = logits[:, :-1, :].contiguous()
-        shifted_labels = labels[:, 1:].contiguous()
-
-        loss_fn = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
-        per_token_loss = loss_fn(shifted_logits.view(-1, shifted_logits.size(-1)), shifted_labels.view(-1))
-        per_token_loss = per_token_loss.view(shifted_labels.shape)
-        
-        valid_mask = shifted_labels != -100
-        per_example_losses = per_token_loss.sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
-        return per_example_losses.mean()
-
     def _inner_training_loop(self, *args, **kwargs):
         # Run an initial evaluation if desired
         eval_results = self.evaluate()

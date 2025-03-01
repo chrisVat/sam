@@ -3,9 +3,9 @@ model_name_or_path: microsoft/phi-2 # microsoft/Phi-3-mini-4k-instruct  # path t
 cache_dir: /data2/chris/data/huggingface_models
 model_max_length: 900
 schedule_name: Full
-result_dir_name: fsam-0.1-pythia-70m-deduped-100-oneshot-130k_mathinstruct_phi-2_3epochs_512_5checkpoints
+result_dir_name: fsam-0.025-pythia-70m-deduped-100-oneshot-130k_mathinstruct_phi-2_3epochs_512_5newlrcheckpoints
 sam_mode: "prefsam"
-sam_rho: 0.1
+sam_rho: 0.025
 sam_adaptive: false
 
 train_args:
@@ -16,7 +16,7 @@ train_args:
   gradient_accumulation_steps: 16
   eval_strategy: "epoch"
   save_strategy: "steps"
-  save_steps: 500
+  save_steps: 250
   save_total_limit: 25
   learning_rate: 2.0e-5
   weight_decay: 0.

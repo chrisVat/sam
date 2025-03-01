@@ -42,9 +42,20 @@ class Schedule:
             #train_num = int(len(dataset_shuffled) * 0.95)
             #train_data = dataset_shuffled.select(range(train_num))
             #val_data = dataset_shuffled.select(range(train_num, len(dataset_shuffled)))
-            split_dataset = raw_dataset.train_test_split(test_size=0.05, seed=42)
-            train_data = split_dataset["train"]
-            val_data = split_dataset["test"]
+
+            # split_dataset = raw_dataset.train_test_split(test_size=0.05, seed=42)
+
+            dataset = raw_dataset.shuffle(seed=42)
+            train_num = int(len(dataset)*0.95)
+            train_data = dataset.select(range(train_num))
+            val_data = dataset.select(range(train_num, len(dataset)))
+
+
+
+            #train_data = split_dataset["train"]
+            #val_data = split_dataset["test"]
+
+
             # use keep only for train data and val data
             #keep_only, keep_only_train = 500, 250
             #train_data = train_data.select(range(keep_only_train))
