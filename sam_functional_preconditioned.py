@@ -29,12 +29,7 @@ class PreconditionedFunctionalSAM(torch.optim.Optimizer):
 
     @torch.no_grad()
     def first_step_functional(self, zero_grad=False, warmup=False):
-        grad_norm = self._grad_norm()  # This now stores the grad norm in self.last_grad_norm.
-        #perturb_sizes = []
-        #grad_sizes = []
-        #preconditioners = []
-        #found_count = 0
-        #not_found_count = 0
+        grad_norm = self._grad_norm() 
         for group in self.param_groups:
             scale = self.rho / (grad_norm + 1e-12)
             for p in group["params"]:
@@ -44,44 +39,15 @@ class PreconditionedFunctionalSAM(torch.optim.Optimizer):
                 
                 state = self.base_optimizer.state[p]
                 if 'exp_avg_sq' in state and not warmup:
-                    #found_count += 1
                     preconditioner = (state['exp_avg_sq'].sqrt() + 1e-8).reciprocal()
-                    #preconditioners.append(torch.norm(preconditioner))
                 else:
-                    #not_found_count += 1
                     preconditioner = torch.ones_like(p.grad)
-
-                
-                """
-                if 'custom_exp_avg_sq' in self.state[p]:
-                    found_count += 1
-                    preconditioner = (self.state[p]['custom_exp_avg_sq'].sqrt() + 1e-3).reciprocal() 
-                    #preconditioners.append(torch.norm(preconditioner))
-                else:
-                    not_found_count += 1
-                    preconditioner = torch.ones_like(p.grad)
-                    self.state[p]['custom_exp_avg_sq'] = torch.ones_like(p.grad)
-                self.state[p]['custom_exp_avg_sq'].mul_(0.9).addcmul_(p.grad, p.grad, value=0.1)
-                """
 
                 e_w = p.grad * scale.to(p) * preconditioner
                 p.add_(e_w) 
         
-                """
-                perturb_sizes.append(torch.norm(e_w))
-                grad_sizes.append(torch.norm(p.grad))
-        # Calculate the average perturbation size
-        avg_perturb_size = torch.norm(torch.stack(perturb_sizes), p=2) / len(perturb_sizes)
-        avg_grad_size = torch.norm(torch.stack(grad_sizes), p=2) / len(grad_sizes)
-        print(f"Average perturbation size: {avg_perturb_size.item()}")
-        print(f"Scale: {scale.item()}")
-        print(f"Average grad size: {avg_grad_size.item()}")
-        """
         if zero_grad:
             self.zero_grad()
-        #print(f"Found count: {found_count}, Not found count: {not_found_count}")
-        #if len(preconditioners) > 0:
-        #    print(f"Average preconditioner size: {sum(preconditioners) / len(preconditioners)}")
 
     
     @torch.no_grad()
@@ -90,7 +56,6 @@ class PreconditionedFunctionalSAM(torch.optim.Optimizer):
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                # Restore original weights
                 p.data = self.state[p]["old_p"]
                 del self.state[p]["old_p"]
         self.base_optimizer.step()  # update weights using the second gradient
@@ -105,7 +70,43 @@ class PreconditionedFunctionalSAM(torch.optim.Optimizer):
         self.first_step(zero_grad=True)
         closure()
         self.second_step()
-    
+
+
+    @torch.no_grad()
+    def state_dict(self):
+        return {
+            'state': self.state,
+            'param_groups': self.param_groups,
+            'base_optimizer': self.base_optimizer.state_dict(),
+            'rho': self.rho,
+            'adaptive': self.adaptive,
+            'kwargs': self.kwargs,
+            'has_preallocated': self.has_preallocated,
+            'last_grad_norm': self.last_grad_norm,
+        }
+
+    @torch.no_grad()
     def load_state_dict(self, state_dict):
-        super().load_state_dict(state_dict)
-        self.base_optimizer.param_groups = self.param_groups
+        if 'base_optimizer' not in state_dict:
+            return
+        
+        self.state = state_dict['state']
+        self.param_groups = state_dict['param_groups']
+        self.rho = state_dict.get('rho', self.rho)
+        self.adaptive = state_dict.get('adaptive', self.adaptive)
+        self.kwargs = state_dict.get('kwargs', self.kwargs)
+        self.has_preallocated = state_dict.get('has_preallocated', self.has_preallocated)
+        self.last_grad_norm = state_dict.get('last_grad_norm', self.last_grad_norm)
+        
+        if 'base_optimizer' in state_dict:
+            self.base_optimizer.load_state_dict(state_dict['base_optimizer'])
+        else:
+            self.base_optimizer = self.base_optimizer_type(self.param_groups, **self.kwargs)
+
+        # move base_optimizer to gpu
+        self.move_optimizer_to_gpu()
+
+        #self.base_optimizer.param_groups = self.param_groups
+        self.param_groups = self.base_optimizer.param_groups
+        self.defaults.update(self.base_optimizer.defaults)
+

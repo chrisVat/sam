@@ -7,11 +7,12 @@ from utils import jload, jdump, make_supervised_data_module, get_model, rank0_pr
 from sam import SAM
 #from functional_sam import PreconditionedFunctionalSAM
 from custom_trainer_sam import FSDPSAMTrainer
-from custom_trainer_functional_sam_memtest import FSDPFunctionalSAMTrainer
+from custom_trainer_functional_sam import FSDPFunctionalSAMTrainer
 from sam_functional import FunctionalSAM 
 from sam_functional_preconditioned import PreconditionedFunctionalSAM
 # ddp
 from torch.nn.parallel import DistributedDataParallel as DDP
+import os
 
 
 class Schedule:
@@ -25,6 +26,17 @@ class Schedule:
         self.full_data_path = args["full_data_path"]
         self.val_data = None
         self.init_label_num = args["init_label_num"] if "init_label_num" in args else 0
+        
+        self.load_from = None
+        self.load_step = None
+        if 'load_from' in args:
+            self.load_from = args.pop('load_from')
+            self.load_from = f"res/{self.load_from}/output"
+            if 'laod_step' in args:
+                self.load_step = args.pop('load_step')
+        
+        
+        
         # load full-sized source data -> for indexing all samples
         if self.full_data_path.endswith(".jsonl"):
             with open(self.full_data_path, "r") as f:
@@ -209,6 +221,23 @@ class Schedule:
             self.model = DDP(self.model, device_ids=[local_rank], output_device=local_rank)
 
 
+        if self.load_from:
+            possible_checkpoints = os.listdir(self.load_from)
+            # keep only folders
+            if self.load_step is None:
+                possible_checkpoints = [ckpt for ckpt in possible_checkpoints if os.path.isdir(os.path.join(self.load_from, ckpt))]
+                # sort on the integer value of the final number checkpoint-x
+                possible_checkpoints = sorted(possible_checkpoints, key=lambda x: int(x.split("-")[-1]))
+                
+                # possible_checkpoints = sorted(possible_checkpoints)
+                checkpoint = possible_checkpoints[-1]
+            else:
+                checkpoint = f"checkpoint-{self.load_step}"
+            checkpoint_dir = os.path.join(self.load_from, checkpoint)
+            print("checkpoints: ", possible_checkpoints)
+            print(f"Loading from checkpoint: {checkpoint_dir}")
+
+        #exit()
         if self.sam_mode == "no":
             trainer = trainer_cls(
                 model=self.model,
@@ -233,12 +262,21 @@ class Schedule:
 
         rank0_print(f"*** Sampler Type: {type(trainer.get_train_dataloader().sampler)}")
 
-
-        trainer.train()
+        trainer.custom_load_dir = None
+        if self.load_from:
+            trainer.custom_load_dir = checkpoint_dir
+            trainer.train(resume_from_checkpoint=checkpoint_dir)
+        else:
+            trainer.train()
+        
         trainer.save_state()
         trainer.save_model(output_dir=output_dir)
-        #self.model.save_pretrained(f"{output_dir}/pretrained")
-        self.model.module.save_pretrained(f"{output_dir}/pretrained")
+        
+        # check if we need ddp saving
+        if torch.distributed.get_world_size() <= 1:
+            self.model.save_pretrained(f"{output_dir}/pretrained")
+        else:
+            self.model.module.save_pretrained(f"{output_dir}/pretrained")
 
     def _create_optimizer_and_scheduler(self, train_dataset):
         lr = self.training_args.learning_rate

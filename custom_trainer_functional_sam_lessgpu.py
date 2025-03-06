@@ -16,9 +16,7 @@ import os
 from consts import LLAMA_IGNORE_INDEX
 import numpy as np
 import inspect
-
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
-
 import contextlib
 
 
@@ -28,9 +26,6 @@ LOG_FOLDER = "loss_logs/"
 if not os.path.exists(LOG_FOLDER):
     os.makedirs(LOG_FOLDER)
 
-
-def _is_peft_model(model):
-    return False
 
 class FSDPFunctionalSAMTrainer(Trainer):
     def __init__(self, *args, sam_mode="no", sam_rho=0.05, sam_adaptive=False, **kwargs):
@@ -42,12 +37,6 @@ class FSDPFunctionalSAMTrainer(Trainer):
         self.global_step = 0 
         self.vjp_preallocated = None
 
-        #print(kwargs)
-        #print(type(kwargs))
-        #print(kwargs['args'])
-        #print(kwargs['args'].run_name)
-        #exit()
-
         if not hasattr(self.model, "no_sync"): # not the best practices, i just want this to work quickly.
             self.model.no_sync = contextlib.nullcontext
 
@@ -56,11 +45,6 @@ class FSDPFunctionalSAMTrainer(Trainer):
         log_filename = f"training_log_rank{gpu_rank}_{kwargs['args'].run_name.replace("/", "")}_{timestamp}.txt"
         self.log_file_path = os.path.join(LOG_FOLDER, log_filename)
         
-        # non ddp
-        #self.model.gradient_checkpointing_enable()
-        # ddp
-        #self.model.module.gradient_checkpointing_enable()
-
 
     def get_param_loss(self, logits, labels):
         # Shift logits and labels so that each prediction corresponds to the next token.
@@ -251,7 +235,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     self.optimizer.move_optimizer_to_gpu()
                     rank0_print(f"Post Move Optimizer to GPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
-                    self.optimizer.final_step(combined=True)
+                    self.optimizer.final_step()
                     rank0_print(f"AFterFinal Step - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
                     self.model.zero_grad()
