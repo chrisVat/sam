@@ -4,7 +4,7 @@ from transformers import Trainer, get_scheduler
 from tqdm.auto import tqdm
 from sam import SAM  
 from sam_functional import FunctionalSAM
-from sam_functional_preconditioned import PreconditionedFunctionalSAM
+#from sam_functional_preconditioned import PreconditionedFunctionalSAM
 from utils import rank0_print
 import torch.distributed as dist
 import datetime
@@ -152,19 +152,21 @@ class FSDPSAMTrainer(Trainer):
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
                 )
-            elif self.sam_mode == "prefsam":
+            elif self.sam_mode == "fsam":
                 self.optimizer = FunctionalSAM(
                     self.model.parameters(),
                     base_optimizer=base_optimizer_fn,
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
+                    precondition=False
                 )
-            elif self.sam_mode == "prefuncsam":
-                self.optimizer = PreconditionedFunctionalSAM(
+            elif self.sam_mode == "preconfsam":
+                self.optimizer = FunctionalSAM(
                     self.model.parameters(),
                     base_optimizer=base_optimizer_fn,
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
+                    precondition=True
                 )
             else:
                 self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=wd)

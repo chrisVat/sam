@@ -7,9 +7,9 @@ from utils import jload, jdump, make_supervised_data_module, get_model, rank0_pr
 from sam import SAM
 #from functional_sam import PreconditionedFunctionalSAM
 from custom_trainer_sam import FSDPSAMTrainer
-from custom_trainer_functional_sam_reduced_gpu import FSDPFunctionalSAMTrainer
+from custom_trainer_functional_sam import FSDPFunctionalSAMTrainer
 from sam_functional import FunctionalSAM 
-from sam_functional_preconditioned import PreconditionedFunctionalSAM
+#from sam_functional_preconditioned import PreconditionedFunctionalSAM
 # ddp
 from torch.nn.parallel import DistributedDataParallel as DDP
 import os
@@ -192,9 +192,9 @@ class Schedule:
             trainer_cls = Seq2SeqTrainer # similarly
         elif self.sam_mode == "sam":
             trainer_cls = FSDPSAMTrainer
-        elif self.sam_mode == "prefsam":
+        elif self.sam_mode == "fsam":
             trainer_cls = FSDPFunctionalSAMTrainer
-        elif self.sam_mode == "prefuncsam":
+        elif self.sam_mode == "preconfsam":
             trainer_cls = FSDPFunctionalSAMTrainer
         else:
             trainer_cls = Trainer
@@ -310,22 +310,21 @@ class Schedule:
                 adaptive=self.sam_adaptive,
             )
 
-        elif self.sam_mode == "prefsam":
-            rank0_print(f"*** Using Functional SAM: rho={self.sam_rho}, adaptive={self.sam_adaptive}")
-
+        elif self.sam_mode == "fsam":
             optimizer = FunctionalSAM(
                 self.model.parameters(),
                 base_optimizer=base_optimizer_fn,
                 rho=self.sam_rho,
-                adaptive=self.sam_adaptive)
-
-        elif self.sam_mode == "prefuncsam":
-            rank0_print(f"*** Using Preconditioned Functional SAM: rho={self.sam_rho}, adaptive={self.sam_adaptive}")
-            optimizer = PreconditionedFunctionalSAM(
+                adaptive=self.sam_adaptive,
+                precondition=False
+            )
+        elif self.sam_mode == "preconfsam":
+            optimizer = FunctionalSAM(
                 self.model.parameters(),
                 base_optimizer=base_optimizer_fn,
                 rho=self.sam_rho,
-                adaptive=self.sam_adaptive
+                adaptive=self.sam_adaptive,
+                precondition=True
             )
 
 

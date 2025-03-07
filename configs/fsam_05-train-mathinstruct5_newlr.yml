@@ -4,7 +4,7 @@ cache_dir: /data2/chris/data/huggingface_models
 model_max_length: 900
 schedule_name: Full
 result_dir_name: fsam-0.025-pythia-70m-deduped-100-oneshot-130k_mathinstruct_phi-2_3epochs_512_5newlrcheckpoints
-sam_mode: "prefsam"
+sam_mode: "fsam"
 sam_rho: 0.025
 sam_adaptive: false
 

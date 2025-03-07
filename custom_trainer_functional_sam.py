@@ -4,7 +4,7 @@ from transformers import Trainer, get_scheduler
 from tqdm.auto import tqdm
 import torch.distributed as dist
 from sam_functional import FunctionalSAM
-from sam_functional_preconditioned import PreconditionedFunctionalSAM
+#from sam_functional_preconditioned import PreconditionedFunctionalSAM
 from utils import rank0_print
 import torch.nn.functional as F
 import gc
@@ -23,17 +23,26 @@ from utils import load_ddp_state_dict
 import numpy as np
 import random
 import math
+from utils import is_running_distributed
+from transformers.utils import is_datasets_available
+from transformers.trainer_utils import seed_worker, has_length
+from torch.utils.data import DataLoader, RandomSampler
+from transformers.trainer_pt_utils import LengthGroupedSampler
+from transformers.optimization import get_scheduler
 
 
-LOG_PRED_LOSS = False
-LOG_FOLDER = "loss_logs/"
 
-if not os.path.exists(LOG_FOLDER):
-    os.makedirs(LOG_FOLDER)
+LOW_GPU = False
 
 
-def _is_peft_model(model):
-    return False
+
+
+
+if is_datasets_available():
+    import datasets
+
+
+
 
 class FSDPFunctionalSAMTrainer(Trainer):
     def __init__(self, *args, sam_mode="no", sam_rho=0.05, sam_adaptive=False, **kwargs):
@@ -51,7 +60,6 @@ class FSDPFunctionalSAMTrainer(Trainer):
         gpu_rank = dist.get_rank() if dist.is_initialized() else 0
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = f"training_log_rank{gpu_rank}_{kwargs['args'].run_name.replace("/", "")}_{timestamp}.txt"
-        self.log_file_path = os.path.join(LOG_FOLDER, log_filename)
 
 
     # nanfriendly version.
@@ -131,15 +139,21 @@ class FSDPFunctionalSAMTrainer(Trainer):
         #self.log(eval_results)
         #rank0_print(f"Initial evaluation results: {eval_results}")
         #rank0_print(f"Pre Load GPU Usage: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+        
+        # load first so there's no random orderings with loading checkpoints
+        train_dataloader = self.get_train_dataloader()
+
+        
+        print("Train Dataloader", train_dataloader)
+        print("train loader length: ", len(train_dataloader))
+    
 
         with torch.no_grad():
             if self.custom_load_dir is not None:
                 self.load_checkpoint(self.custom_load_dir)
 
         self.model.train() 
-        train_dataloader = self.get_train_dataloader()
-        print("Train Dataloader", train_dataloader)
-        print("train loader length: ", len(train_dataloader))
+
 
         accum_steps = (
             self.args.gradient_accumulation_steps
@@ -153,7 +167,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
 
         progress_bar = tqdm(
             total=total_updates_per_epoch * int(self.args.num_train_epochs),
-            desc=f"Rank {dist.get_rank()} Training",
+            desc=f"Rank {dist.get_rank() if is_running_distributed() else 0} Training",
         )
 
         self.total_loss = 0.0
@@ -187,28 +201,66 @@ class FSDPFunctionalSAMTrainer(Trainer):
                         progress_bar.update(1)
                     del inputs
                     continue
-                
+
+
                 #rank0_print(f"Getting Minibatch - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                 with self.model.no_sync():
                     self.get_minibatch_gradients(inputs)
                 #rank0_print(f"Post Computing Minibatch Gradients - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
-            
+                
                 if len(self.accumulated_inputs) == accum_steps:
-                    self.sync_grads()
+                    if is_running_distributed():
+                        self.sync_grads()
                     with self.model.no_sync():
                         #rank0_print(f"Pre Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                        
+                        if self.optimizer.precondition and LOW_GPU:
+                            self.optimizer.move_adamw_second_moment_to_gpu(second_only=True)
+                        
                         self.optimizer.first_step_functional(zero_grad=True) # , warmup=global_step<=MIN_WARMUP_STEPS)
+                        
+                        #if self.optimizer.precondition:
+                        #    self.optimizer.move_adamw_second_moment_to_cpu()
+                            
                         #rank0_print(f"Post Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         # moves old params to cpu, optional depending on gpu usage
                         self.optimizer.move_old_to_cpu()
-                        #rank0_print("Calling Second Step Functional - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                        #self.optimizer.move_optimizer_to_cpu()
+                        #rank0_print(f"Calling Second Step Functional - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         self.second_step_functional() 
+                        #rank0_print(f"Done Second Step Functional - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
-                    self.sync_grads()
-                    self.optimizer.final_step()
+                    if is_running_distributed():
+                        self.sync_grads()
+
+                    #rank0_print(f"Moving Optimizer to GPU: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                    #self.optimizer.move_optimizer_to_gpu()
+                    #rank0_print(f"restored GPU parameters - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                    self.optimizer.restore_old()
+
+                    #rank0_print(f"Moving Old to GPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                    #self.optimizer.move_old_to_gpu()
+                    #rank0_print(f"Post Moments to GPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                    
+                    if LOW_GPU:
+                        self.optimizer.move_adamw_second_moment_to_gpu()
+
+                    cur_grad_norm = self.optimizer._grad_norm().item()
+
+                    #rank0_print(f"Final Step - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                    self.optimizer.final_step(zero_grad=True, restore_old=False)
+                    #rank0_print(f"Post Final Step - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                    if LOW_GPU:
+                        self.optimizer.move_adamw_second_moment_to_cpu()
+                    #rank0_print(f"Post Moving AdamW Second Moment to CPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
                     self.model.zero_grad()
                     self.optimizer.zero_grad()
+
+                    #self.optimizer.inspect_optimizer_state()
+
+                    #self.optimizer.move_adamw_second_moment_to_cpu()
+                    #self.optimizer.move_old_to_cpu()
 
                     num_batches += 1
 
@@ -222,27 +274,28 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     self.accumulated_logit_grads = []
 
                     # only step for rank 0
-                    if self.lr_scheduler is not None and dist.get_rank() == 0:
+                    if self.lr_scheduler is not None and (not is_running_distributed() or dist.get_rank() == 0):
                         self.lr_scheduler.step()
                     global_step += 1
                     updates_this_epoch += 1
-                    epoch_float = epoch + (updates_this_epoch / total_updates_per_epoch)
+                    epoch_float = epoch + ((global_step % total_updates_per_epoch) / total_updates_per_epoch)
 
                     self.epoch_loss += self.accumulated_pred_loss
 
                     logs = {
-                        "pred_loss": round(self.accumulated_pred_loss, 4),
+                        "loss": round(self.accumulated_pred_loss, 4),
                         "avg_epoch_loss": round((self.epoch_loss / num_batches), 4),
-                        "learning_rate": round(self.lr_scheduler.get_last_lr()[0], 6) if self.lr_scheduler else None,
+                        "learning_rate": self.lr_scheduler.get_last_lr()[0] if self.lr_scheduler else None,
                         "epoch": round(epoch_float, 2),
+                        "grad_norm": round(cur_grad_norm, 9),
                     }
                     self.state.global_step = global_step
                     self.callback_handler.on_log(self.args, self.state, self.control, logs)
-                    logs["rank"] = dist.get_rank()
+                    #logs["rank"] = dist.get_rank()
                     print(logs)
 
                     if self.state.global_step % self.args.save_steps == 0:
-                        if dist.get_rank() == 0:
+                        if not is_running_distributed() or dist.get_rank() == 0:
                             print("Saving model checkpoint at global step: ", self.state.global_step)
                             with self.model.no_sync():
                                 self._save_checkpoint(self.model, trial=None)
@@ -253,7 +306,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     progress_bar.set_postfix(logs)
 
             if self.args.eval_strategy == "epoch" and self.eval_dataset is not None:
-                print(f"Epoch {epoch+1} finished on rank {dist.get_rank()}. Awaiting evaluation...")
+                print(f"Epoch {epoch+1} finished. Awaiting evaluation...")
                 if torch.distributed.is_initialized():
                     torch.distributed.barrier()
                     self.model.zero_grad(set_to_none=True)  # Free gradient memory
@@ -292,19 +345,21 @@ class FSDPFunctionalSAMTrainer(Trainer):
             def base_optimizer_fn(param_groups):
                 return AdamW(param_groups, lr=lr, weight_decay=wd)
 
-            if self.sam_mode == "prefsam":
+            if self.sam_mode == "fsam":
                 self.optimizer = FunctionalSAM(
                     self.model.parameters(),
                     base_optimizer=base_optimizer_fn,
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
+                    precondition=False
                 )
-            elif self.sam.mode == "prefuncsam":
-                self.optimizer = PreconditionedFunctionalSAM(
+            elif self.sam_mode == "preconfsam":
+                self.optimizer = FunctionalSAM(
                     self.model.parameters(),
                     base_optimizer=base_optimizer_fn,
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
+                    precondition=True
                 )
             else:
                 self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=wd)
@@ -344,18 +399,19 @@ class FSDPFunctionalSAMTrainer(Trainer):
                         if param is not None:
                             if param.grad is None:
                                 param.grad = torch.zeros_like(param, device=self.model.device)
-                            param.grad.add_(grad).div_(microbatch_count)
-                        grad.zero_()
+                            param.grad.add_(grad) # .div_(microbatch_count)
+                        #grad.zero_()
 
-
+            num_microbatches = 0
             # Process each accumulated input and corresponding logit gradient.
             for batch_cpu, cur_logit_grad in zip(self.accumulated_inputs, self.accumulated_logit_grads):
                 batch_size = batch_cpu["input_ids"].shape[0]
                 # Determine microbatch size based on max_seq_len.
 
-                next_best = batch_size // 2
-                next_best = 1
-                microbatch_size = batch_size if max_seq_len <= 200 else max(next_best, 1)
+                #next_best = batch_size // 2
+                #next_best = 1
+                #microbatch_size = batch_size if max_seq_len <= 200 else max(next_best, 1)
+                microbatch_size = 1
                 microbatch_count = (batch_size + microbatch_size - 1) // microbatch_size
 
                 # Process the batch in microbatches.
@@ -372,6 +428,8 @@ class FSDPFunctionalSAMTrainer(Trainer):
                         .contiguous().detach().to(self.model.device)
                     )
                     accumulate_gradients(compute_vjp_grads(microbatch, cur_avg_logit_grad), microbatch_count)
+                    num_microbatches += 1
+                    
                     #rank0_print(f"After accumulate gradients - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
                     # clear memory
@@ -381,8 +439,76 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     del cur_avg_logit_grad
                 del batch_cpu, cur_logit_grad
 
+            # scale the accumulated gradients
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    p.grad.div_(num_microbatches)
+
+
             self.accumulated_inputs = []
             self.accumulated_logit_grads = []
+
+    def _get_train_sampler(self):
+        if self.train_dataset is None or not has_length(self.train_dataset):
+            return None
+
+        # Ensure that a shared generator exists.
+        if not hasattr(self, "_generator"):
+            self._generator = torch.Generator()
+            self._generator.manual_seed(42)
+        generator = self._generator
+
+
+        # Build the sampler.
+        if self.args.group_by_length:
+            if is_datasets_available() and isinstance(self.train_dataset, datasets.Dataset):
+                lengths = (
+                    self.train_dataset[self.args.length_column_name]
+                    if self.args.length_column_name in self.train_dataset.column_names
+                    else None
+                )
+            else:
+                lengths = None
+            model_input_name = (
+                self.processing_class.model_input_names[0] if self.processing_class is not None else None
+            )
+            return LengthGroupedSampler(
+                self.args.train_batch_size * self.args.gradient_accumulation_steps,
+                dataset=self.train_dataset,
+                lengths=lengths,
+                model_input_name=model_input_name,
+                generator=generator
+            )
+
+        else:
+            return RandomSampler(self.train_dataset, generator=generator)
+
+    def get_train_dataloader(self):
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+
+        train_dataset = self.train_dataset
+        data_collator = self.data_collator
+        if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
+            train_dataset = self._remove_unused_columns(train_dataset, description="training")
+        else:
+            data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
+
+        dataloader_params = {
+            "batch_size": self._train_batch_size,
+            "collate_fn": data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
+        }
+
+        if not isinstance(train_dataset, torch.utils.data.IterableDataset):
+            dataloader_params["sampler"] = self._get_train_sampler()
+            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["worker_init_fn"] = seed_worker
+            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
+
+        return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
 
 
 

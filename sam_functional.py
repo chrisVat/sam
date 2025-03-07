@@ -3,7 +3,8 @@ from utils import rank0_print
 
 
 class FunctionalSAM(torch.optim.Optimizer):
-    def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, **kwargs):
+    def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, precondition=False, **kwargs):
+        print("This ran!, precondition is ", precondition)
         assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
         defaults = dict(rho=rho, adaptive=adaptive, **kwargs)
         super(FunctionalSAM, self).__init__(params, defaults)
@@ -12,6 +13,7 @@ class FunctionalSAM(torch.optim.Optimizer):
         self.param_groups = self.base_optimizer.param_groups
         self.defaults.update(self.base_optimizer.defaults)
         self.last_grad_norm = None  # Store the last computed grad norm
+        self.precondition = precondition
         self.rho = rho
         self.kwargs = kwargs
         self.device = self.param_groups[0]["params"][0].device
@@ -31,9 +33,34 @@ class FunctionalSAM(torch.optim.Optimizer):
         p=2)
         return norm
 
+
+    @torch.no_grad()
+    def precondition_grads(self):
+        if not self.has_preallocated:
+            self._preallocate_model()
+        
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                state = self.base_optimizer.state[p]
+                if 'exp_avg_sq' in state:
+                    preconditioner = (state['exp_avg_sq'].sqrt() + 1e-6).reciprocal()                
+                else:
+                    preconditioner = torch.ones_like(p.grad)
+                p.grad.mul_(preconditioner)
+                
+                del preconditioner
+        #print("Preconditioned!")
+
+
     @torch.no_grad()
     def first_step_functional(self, zero_grad=False, warmup=False): # warmup does nothing here, just so i can reuse files
+        if self.precondition:
+            self.precondition_grads()
+        
         grad_norm = self._grad_norm()  # This now stores the grad norm in self.last_grad_norm.
+        
         if not self.has_preallocated:
             self._preallocate_model()
         
@@ -64,7 +91,7 @@ class FunctionalSAM(torch.optim.Optimizer):
         if restore_old:
             self.restore_old()
 
-        rank0_print(f"Transferred back from old - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+        #rank0_print(f"Transferred back from old - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
         self.has_preallocated = False
 
         self.base_optimizer.step()  # update weights using the second gradient
@@ -128,18 +155,22 @@ class FunctionalSAM(torch.optim.Optimizer):
 
 
     @torch.no_grad()
-    def move_adamw_second_moment_to_cpu(self):
+    def move_adamw_second_moment_to_cpu(self, second_only=False):
+        target_keys = ["exp_avg_sq", "exp_avg"] if not second_only else ["exp_avg_sq"]
+
         for param in self.base_optimizer.state:
             state = self.base_optimizer.state[param]
-            for key in ["exp_avg_sq", "exp_avg"]:  # Iterate over both keys
+            for key in target_keys:  # Iterate over both keys
                 if key in state:
                     state[key] = state[key].cpu()  # Move to CPU in a single loop
 
     @torch.no_grad()
-    def move_adamw_second_moment_to_gpu(self):
+    def move_adamw_second_moment_to_gpu(self, second_only=False):
+        target_keys = ["exp_avg_sq", "exp_avg"] if not second_only else ["exp_avg_sq"]
+        
         for param in self.base_optimizer.state:
             state = self.base_optimizer.state[param]
-            for key in ["exp_avg_sq", "exp_avg"]:  # Iterate over both keys
+            for key in target_keys:  # Iterate over both keys
                 if key in state:
                     state[key] = state[key].cuda()  # Move to GPU in a single loop
 
@@ -148,6 +179,7 @@ class FunctionalSAM(torch.optim.Optimizer):
         for group in self.param_groups:
             for p in group["params"]:
                 self.state[p]["old_p"] = self.state[p]["old_p"].cuda()
+                del self.state[p]["old_p"]
         self.has_preallocated = True
 
     # Saving and loading properly
@@ -166,8 +198,8 @@ class FunctionalSAM(torch.optim.Optimizer):
 
     @torch.no_grad()
     def load_state_dict(self, state_dict):
-        if 'base_optimizer' not in state_dict:
-            return
+        #if 'base_optimizer' not in state_dict:
+        #    return
         
         self.state = state_dict['state']
         self.param_groups = state_dict['param_groups']
@@ -178,9 +210,11 @@ class FunctionalSAM(torch.optim.Optimizer):
         self.last_grad_norm = state_dict.get('last_grad_norm', self.last_grad_norm)
         
         if 'base_optimizer' in state_dict:
+            print("loading base optimizer!")
             self.base_optimizer.load_state_dict(state_dict['base_optimizer'])
         else:
             self.base_optimizer = self.base_optimizer_type(self.param_groups, **self.kwargs)
+            print("creating base optimizer")
 
         # move base_optimizer to gpu
         self.move_optimizer_to_gpu()

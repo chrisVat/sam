@@ -4,7 +4,7 @@ from transformers import Trainer, get_scheduler
 from tqdm.auto import tqdm
 import torch.distributed as dist
 from sam_functional import FunctionalSAM
-from sam_functional_preconditioned import PreconditionedFunctionalSAM
+#from sam_functional_preconditioned import PreconditionedFunctionalSAM
 from utils import rank0_print
 import torch.nn.functional as F
 import gc
@@ -196,19 +196,21 @@ class DefaultTrainer(Trainer):
             def base_optimizer_fn(param_groups):
                 return AdamW(param_groups, lr=lr, weight_decay=wd)
 
-            if self.sam_mode == "prefsam":
+            if self.sam_mode == "fsam":
                 self.optimizer = FunctionalSAM(
                     self.model.parameters(),
                     base_optimizer=base_optimizer_fn,
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
+                    precondition=False
                 )
-            elif self.sam.mode == "prefuncsam":
-                self.optimizer = PreconditionedFunctionalSAM(
+            elif self.sam_mode == "preconfsam":
+                self.optimizer = FunctionalSAM(
                     self.model.parameters(),
                     base_optimizer=base_optimizer_fn,
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
+                    precondition=True
                 )
             else:
                 self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=wd)

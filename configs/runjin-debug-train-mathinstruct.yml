@@ -4,7 +4,7 @@ cache_dir: /data2/chris/data/huggingface_models
 model_max_length: 512
 schedule_name: Full
 result_dir_name: runjin-DEBUG-fsam2-0.05-llama3.21B_mathinstruct_phi-2_3epochs_512
-sam_mode: "prefsam"
+sam_mode: "fsam"
 sam_rho: 0.05
 sam_adaptive: false
 

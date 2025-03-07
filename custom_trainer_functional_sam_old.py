@@ -4,7 +4,7 @@ from transformers import Trainer, get_scheduler
 from tqdm.auto import tqdm
 import torch.distributed as dist
 from sam_functional import FunctionalSAM
-from sam_functional_preconditioned import PreconditionedFunctionalSAM
+#from sam_functional_preconditioned import PreconditionedFunctionalSAM
 from utils import rank0_print
 import torch.nn.functional as F
 import gc
@@ -23,7 +23,6 @@ from utils import load_ddp_state_dict
 import numpy as np
 import random
 import math
-from utils import is_running_distributed
 
 
 LOG_PRED_LOSS = False
@@ -154,7 +153,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
 
         progress_bar = tqdm(
             total=total_updates_per_epoch * int(self.args.num_train_epochs),
-            desc=f"Rank {dist.get_rank() if is_running_distributed() else 0} Training",
+            desc=f"Rank {dist.get_rank()} Training",
         )
 
         self.total_loss = 0.0
@@ -167,7 +166,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
             self.optimizer.zero_grad()
             self.model.zero_grad()
 
-        rank0_print(f"Starting GPU Usage: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+        #rank0_print(f"Starting GPU Usage: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
         for epoch in range(int(self.args.num_train_epochs)):
             self.cur_epoch = epoch
@@ -189,48 +188,27 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     del inputs
                     continue
                 
-                rank0_print(f"Getting Minibatch - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                #rank0_print(f"Getting Minibatch - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                 with self.model.no_sync():
                     self.get_minibatch_gradients(inputs)
-                rank0_print(f"Post Computing Minibatch Gradients - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
-                
+                #rank0_print(f"Post Computing Minibatch Gradients - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+            
                 if len(self.accumulated_inputs) == accum_steps:
-                    if is_running_distributed():
-                        self.sync_grads()
+                    self.sync_grads()
                     with self.model.no_sync():
-                        rank0_print(f"Pre Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                        #rank0_print(f"Pre Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         self.optimizer.first_step_functional(zero_grad=True) # , warmup=global_step<=MIN_WARMUP_STEPS)
-                        rank0_print(f"Post Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                        #rank0_print(f"Post Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         # moves old params to cpu, optional depending on gpu usage
                         self.optimizer.move_old_to_cpu()
-                        #self.optimizer.move_optimizer_to_cpu()
-                        rank0_print(f"Calling Second Step Functional - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                        #rank0_print("Calling Second Step Functional - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         self.second_step_functional() 
-                        rank0_print(f"Done Second Step Functional - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
-                    if is_running_distributed():
-                        self.sync_grads()
-
-                    #rank0_print(f"Moving Optimizer to GPU: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
-                    #self.optimizer.move_optimizer_to_gpu()
-                    rank0_print(f"Moving Old to GPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
-                    self.optimizer.move_old_to_gpu()
-                    rank0_print(f"Post Moments to GPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
-                    self.optimizer.move_adamw_second_moment_to_gpu()
-
-                    rank0_print(f"Final Step - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
-                    self.optimizer.final_step(zero_grad=True)
-                    rank0_print(f"Post Final Step - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
-                    self.optimizer.move_adamw_second_moment_to_cpu()
-                    rank0_print(f"Post Moving AdamW Second Moment to CPU - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                    self.sync_grads()
+                    self.optimizer.final_step()
 
                     self.model.zero_grad()
                     self.optimizer.zero_grad()
-
-                    self.optimizer.inspect_optimizer_state()
-
-                    #self.optimizer.move_adamw_second_moment_to_cpu()
-                    #self.optimizer.move_old_to_cpu()
 
                     num_batches += 1
 
@@ -244,7 +222,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     self.accumulated_logit_grads = []
 
                     # only step for rank 0
-                    if self.lr_scheduler is not None and (not is_running_distributed() or dist.get_rank() == 0):
+                    if self.lr_scheduler is not None and dist.get_rank() == 0:
                         self.lr_scheduler.step()
                     global_step += 1
                     updates_this_epoch += 1
@@ -260,11 +238,11 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     }
                     self.state.global_step = global_step
                     self.callback_handler.on_log(self.args, self.state, self.control, logs)
-                    #logs["rank"] = dist.get_rank()
+                    logs["rank"] = dist.get_rank()
                     print(logs)
 
                     if self.state.global_step % self.args.save_steps == 0:
-                        if not is_running_distributed() or dist.get_rank() == 0:
+                        if dist.get_rank() == 0:
                             print("Saving model checkpoint at global step: ", self.state.global_step)
                             with self.model.no_sync():
                                 self._save_checkpoint(self.model, trial=None)
@@ -275,7 +253,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     progress_bar.set_postfix(logs)
 
             if self.args.eval_strategy == "epoch" and self.eval_dataset is not None:
-                print(f"Epoch {epoch+1} finished. Awaiting evaluation...")
+                print(f"Epoch {epoch+1} finished on rank {dist.get_rank()}. Awaiting evaluation...")
                 if torch.distributed.is_initialized():
                     torch.distributed.barrier()
                     self.model.zero_grad(set_to_none=True)  # Free gradient memory
@@ -314,19 +292,21 @@ class FSDPFunctionalSAMTrainer(Trainer):
             def base_optimizer_fn(param_groups):
                 return AdamW(param_groups, lr=lr, weight_decay=wd)
 
-            if self.sam_mode == "prefsam":
+            if self.sam_mode == "fsam":
                 self.optimizer = FunctionalSAM(
                     self.model.parameters(),
                     base_optimizer=base_optimizer_fn,
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
+                    precondition=False
                 )
-            elif self.sam.mode == "prefuncsam":
-                self.optimizer = PreconditionedFunctionalSAM(
+            elif self.sam_mode == "preconfsam":
+                self.optimizer = FunctionalSAM(
                     self.model.parameters(),
                     base_optimizer=base_optimizer_fn,
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
+                    precondition=True
                 )
             else:
                 self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=wd)
@@ -366,7 +346,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                         if param is not None:
                             if param.grad is None:
                                 param.grad = torch.zeros_like(param, device=self.model.device)
-                            #param.grad.add_(grad).div_(microbatch_count)
+                            param.grad.add_(grad).div_(microbatch_count)
                         grad.zero_()
 
 
