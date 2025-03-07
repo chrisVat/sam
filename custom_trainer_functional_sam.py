@@ -4,7 +4,6 @@ from transformers import Trainer, get_scheduler
 from tqdm.auto import tqdm
 import torch.distributed as dist
 from sam_functional import FunctionalSAM
-#from sam_functional_preconditioned import PreconditionedFunctionalSAM
 from utils import rank0_print
 import torch.nn.functional as F
 import gc
@@ -30,18 +29,12 @@ from torch.utils.data import DataLoader, RandomSampler
 from transformers.trainer_pt_utils import LengthGroupedSampler
 from transformers.optimization import get_scheduler
 
-
-
-LOW_GPU = False
-
-
-
-
-
 if is_datasets_available():
     import datasets
 
 
+
+LOW_GPU = True
 
 
 class FSDPFunctionalSAMTrainer(Trainer):
@@ -219,8 +212,8 @@ class FSDPFunctionalSAMTrainer(Trainer):
                         
                         self.optimizer.first_step_functional(zero_grad=True) # , warmup=global_step<=MIN_WARMUP_STEPS)
                         
-                        #if self.optimizer.precondition:
-                        #    self.optimizer.move_adamw_second_moment_to_cpu()
+                        if self.optimizer.precondition:
+                            self.optimizer.move_adamw_second_moment_to_cpu(second_only=True)
                             
                         #rank0_print(f"Post Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                         # moves old params to cpu, optional depending on gpu usage

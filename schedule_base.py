@@ -70,9 +70,9 @@ class Schedule:
 
 
             # use keep only for train data and val data
-            keep_only, keep_only_train = 500, 250
-            train_data = train_data.select(range(keep_only_train))
-            val_data = val_data.select(range(keep_only))
+            #keep_only, keep_only_train = 500, 250
+            #train_data = train_data.select(range(keep_only_train))
+            #val_data = val_data.select(range(keep_only))
             
             self.train_data = [train_data[i] for i in range(len(train_data))]
             self.val_data = [val_data[i] for i in range(len(val_data))]

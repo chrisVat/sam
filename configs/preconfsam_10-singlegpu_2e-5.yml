@@ -3,7 +3,7 @@ model_name_or_path: microsoft/phi-2 # microsoft/Phi-3-mini-4k-instruct  # path t
 cache_dir: /home/chrisv/cache/
 model_max_length: 900
 schedule_name: Full
-result_dir_name: preconfsam-0.10-mathinstruct_phi-2_3epochs_900-1gpu_lr5e-6_bs32
+result_dir_name: preconfsam-0.10-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32
 sam_mode: "preconfsam"
 sam_rho: 0.1
 sam_adaptive: false
@@ -19,7 +19,7 @@ train_args:
   save_strategy: "steps"
   save_steps: 250
   save_total_limit: 25
-  learning_rate: 5.0e-6
+  learning_rate: 2.0e-5
   weight_decay: 0.
   warmup_ratio: 0.03
   lr_scheduler_type: cosine
