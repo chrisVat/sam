@@ -7,12 +7,13 @@ from utils import jload, jdump, make_supervised_data_module, get_model, rank0_pr
 from sam import SAM
 #from functional_sam import PreconditionedFunctionalSAM
 from custom_trainer_sam import FSDPSAMTrainer
-from custom_trainer_functional_sam import FSDPFunctionalSAMTrainer
+from custom_trainer_functional_sam_reduced_gpu import FSDPFunctionalSAMTrainer
 from sam_functional import FunctionalSAM 
 from sam_functional_preconditioned import PreconditionedFunctionalSAM
 # ddp
 from torch.nn.parallel import DistributedDataParallel as DDP
 import os
+from utils import is_running_distributed
 
 
 class Schedule:
@@ -69,9 +70,9 @@ class Schedule:
 
 
             # use keep only for train data and val data
-            #keep_only, keep_only_train = 500, 250
-            #train_data = train_data.select(range(keep_only_train))
-            #val_data = val_data.select(range(keep_only))
+            keep_only, keep_only_train = 500, 250
+            train_data = train_data.select(range(keep_only_train))
+            val_data = val_data.select(range(keep_only))
             
             self.train_data = [train_data[i] for i in range(len(train_data))]
             self.val_data = [val_data[i] for i in range(len(val_data))]
@@ -110,13 +111,13 @@ class Schedule:
 
     def initialize_labeled_data(self):
         """Randomly init labeled pool"""
-        if torch.distributed.get_rank() == 0:
+        if not is_running_distributed() or torch.distributed.get_rank() == 0:
             tmp_idxs = torch.randperm(self.n_pool)  # randomly permute indices (total_data_size, )
             self.labeled_idx[tmp_idxs[:self.init_label_num]] = True  # labeled=1, unlabeled=0 (total_data_size,)
 
     def save_labeled_unlabeled_data(self):
         """update & save current labaled & unlabeled pool"""
-        if torch.distributed.get_rank() == 0:
+        if not is_running_distributed() or torch.distributed.get_rank() == 0:
             # obtain & check labeled_idx for current round
             labeled_idx = torch.arange(self.n_pool)[self.labeled_idx.bool()]  # self.labeled_idx -> kept upated
 
@@ -128,7 +129,7 @@ class Schedule:
             labeled_data_path = f"{self.data_path_root}/labeled.json"
             labeled_idx_path = f"{self.data_path_root}/labeled_idx.npy"
             unlabeled_data_path = f"{self.data_path_root}/unlabeled.json"
-            if torch.distributed.get_rank() == 0:
+            if not is_running_distributed() or torch.distributed.get_rank() == 0:
                 retry = 0
                 while True:
                     jdump(labeled_data_json_format, labeled_data_path)
@@ -171,7 +172,7 @@ class Schedule:
     def train(self):
         data_module = self.get_updated_train_data()
         # sanity-check
-        if torch.distributed.get_rank() == 0:
+        if not is_running_distributed() or torch.distributed.get_rank() == 0:
             for sanity_sample in data_module["train_dataset"]:
                 break
             rank0_print(f"*** SANITY-CHECK: Training-Sample#1. - TEXT.:\n\n{self.tokenizer.decode(sanity_sample['input_ids'])}\n\n")
@@ -215,27 +216,35 @@ class Schedule:
 
         self.training_args.remove_unused_columns = False
 
-        local_rank = torch.distributed.get_rank()
-        self.model.to(local_rank)
-        if torch.distributed.get_world_size() > 1:
-            self.model = DDP(self.model, device_ids=[local_rank], output_device=local_rank)
+        if is_running_distributed():
+            local_rank = torch.distributed.get_rank()
+            self.model.to(local_rank)
+
+            if torch.distributed.get_world_size() > 1:
+                self.model = DDP(self.model, device_ids=[local_rank], output_device=local_rank)
+        else: # set to first available gpu
+            self.model.to("cuda:0")
 
 
         if self.load_from:
             possible_checkpoints = os.listdir(self.load_from)
-            # keep only folders
-            if self.load_step is None:
-                possible_checkpoints = [ckpt for ckpt in possible_checkpoints if os.path.isdir(os.path.join(self.load_from, ckpt))]
-                # sort on the integer value of the final number checkpoint-x
-                possible_checkpoints = sorted(possible_checkpoints, key=lambda x: int(x.split("-")[-1]))
-                
-                # possible_checkpoints = sorted(possible_checkpoints)
-                checkpoint = possible_checkpoints[-1]
+            if len(possible_checkpoints) == 0:
+                self.load_from = None
+                self.load_step = None
             else:
-                checkpoint = f"checkpoint-{self.load_step}"
-            checkpoint_dir = os.path.join(self.load_from, checkpoint)
-            print("checkpoints: ", possible_checkpoints)
-            print(f"Loading from checkpoint: {checkpoint_dir}")
+                # keep only folders
+                if self.load_step is None:
+                    possible_checkpoints = [ckpt for ckpt in possible_checkpoints if os.path.isdir(os.path.join(self.load_from, ckpt))]
+                    # sort on the integer value of the final number checkpoint-x
+                    possible_checkpoints = sorted(possible_checkpoints, key=lambda x: int(x.split("-")[-1]))
+                    
+                    # possible_checkpoints = sorted(possible_checkpoints)
+                    checkpoint = possible_checkpoints[-1]
+                else:
+                    checkpoint = f"checkpoint-{self.load_step}"
+                checkpoint_dir = os.path.join(self.load_from, checkpoint)
+                print("checkpoints: ", possible_checkpoints)
+                print(f"Loading from checkpoint: {checkpoint_dir}")
 
         #exit()
         if self.sam_mode == "no":

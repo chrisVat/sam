@@ -5,6 +5,8 @@ sys.path.insert(0, os.path.abspath('.'))
 from schedule_base import Schedule
 from utils import make_supervised_data_module
 
+from utils import is_running_distributed
+
 class Full(Schedule):
     def __init__(self,
         model,
@@ -19,7 +21,7 @@ class Full(Schedule):
 
     def initialize_labeled_data(self):
         """initialize labeled data as full data"""
-        if torch.distributed.get_rank() == 0:
+        if not is_running_distributed() or torch.distributed.get_rank() == 0:
             self.labeled_idx[:] = True
 
     def get_updated_train_data(self):

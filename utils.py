@@ -17,6 +17,10 @@ from safetensors.torch import load_file
 import warnings
 
 
+def is_running_distributed():
+    return "RANK" in os.environ and "WORLD_SIZE" in os.environ
+
+
 ## ALPACA-STYLE PROMPT: forked from https://github.com/tatsu-lab/stanford_alpaca
 class Prompter(object):
     __slots__ = ("template", "_verbose")
@@ -232,8 +236,8 @@ class SupervisedDataset(Dataset):
 
             #val_data = split_dataset["test"]
 
-            #keep_only, keep_only_train = 500, 250
-            #list_data_dict = [list_data_dict[i] for i in range(keep_only_train)]
+            keep_only, keep_only_train = 500, 250
+            list_data_dict = [list_data_dict[i] for i in range(keep_only_train)]
             
             self.train_data = [list_data_dict[i] for i in range(len(list_data_dict))]
         elif 'Asclepius' in data_path:

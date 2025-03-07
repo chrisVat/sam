@@ -7,19 +7,21 @@ from utils import get_tokenizer, smart_tokenizer_and_embedding_resize, get_model
 import torch.distributed as dist
 import datetime
 import torch
+from utils import is_running_distributed
 
 
-ESTABLISH_KILLSWITCH = True
+ESTABLISH_KILLSWITCH = False
 if ESTABLISH_KILLSWITCH:
     from killswitch import setup_killswitch
     setup_killswitch()
 
 
-if not dist.is_initialized():
-    timeout_secs = 28800*2
-    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=timeout_secs))
-    torch.cuda.set_device(dist.get_rank())
-    print(f"Initialized process group with timeout {timeout_secs/3600} hours.")
+if is_running_distributed():
+    if not dist.is_initialized():
+        timeout_secs = 28800*2
+        dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=timeout_secs))
+        torch.cuda.set_device(dist.get_rank())
+        print(f"Initialized process group with timeout {timeout_secs/3600} hours.")
 
 
 ## GET_SCHEDULES

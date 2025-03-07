@@ -1,5 +1,5 @@
 import torch
-
+from utils import rank0_print
 
 
 class FunctionalSAM(torch.optim.Optimizer):
@@ -50,12 +50,22 @@ class FunctionalSAM(torch.optim.Optimizer):
             self.zero_grad()
     
     @torch.no_grad()
-    def final_step(self, zero_grad=False):
+    def restore_old(self):
         for group in self.param_groups:
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                p.data.copy_(self.state[p]["old_p"])
+                p.data.copy_(self.state[p]["old_p"].cuda())
+                del self.state[p]["old_p"]
+
+
+    @torch.no_grad()
+    def final_step(self, zero_grad=False, restore_old=False):
+        if restore_old:
+            self.restore_old()
+
+        rank0_print(f"Transferred back from old - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+        self.has_preallocated = False
 
         self.base_optimizer.step()  # update weights using the second gradient
         if zero_grad:
@@ -103,21 +113,35 @@ class FunctionalSAM(torch.optim.Optimizer):
                 self.state[p]["old_p"] = self.state[p]["old_p"].cpu()
         self.has_preallocated = False
 
+    def inspect_optimizer_state(self):
+        print("Inspecting optimizer state")
+        # iterate over state, check if its a tensor and if its on gpu
+        unique_keys = set()
+
+        for param in self.base_optimizer.state:
+            state = self.base_optimizer.state[param]
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    if key not in unique_keys:
+                        unique_keys.add(key)
+                        print(f"Key: {key}, Device: {value.device}")
+
+
     @torch.no_grad()
     def move_adamw_second_moment_to_cpu(self):
         for param in self.base_optimizer.state:
             state = self.base_optimizer.state[param]
-            # exp_avg_sq
-            if "exp_avg_sq" in state:
-                state["exp_avg_sq"] = state["exp_avg_sq"].cpu()
+            for key in ["exp_avg_sq", "exp_avg"]:  # Iterate over both keys
+                if key in state:
+                    state[key] = state[key].cpu()  # Move to CPU in a single loop
 
     @torch.no_grad()
     def move_adamw_second_moment_to_gpu(self):
         for param in self.base_optimizer.state:
             state = self.base_optimizer.state[param]
-            # exp_avg_sq
-            if "exp_avg_sq" in state:
-                state["exp_avg_sq"] = state["exp_avg_sq"].cuda()
+            for key in ["exp_avg_sq", "exp_avg"]:  # Iterate over both keys
+                if key in state:
+                    state[key] = state[key].cuda()  # Move to GPU in a single loop
 
     @torch.no_grad()
     def move_old_to_gpu(self):

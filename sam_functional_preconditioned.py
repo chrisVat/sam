@@ -39,7 +39,7 @@ class PreconditionedFunctionalSAM(torch.optim.Optimizer):
                 
                 state = self.base_optimizer.state[p]
                 if 'exp_avg_sq' in state and not warmup:
-                    preconditioner = (state['exp_avg_sq'].sqrt() + 1e-8).reciprocal()
+                    preconditioner = (state['exp_avg_sq'].sqrt() + 1e-8).reciprocal()                
                 else:
                     preconditioner = torch.ones_like(p.grad)
 
