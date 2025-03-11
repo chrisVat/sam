@@ -433,9 +433,9 @@ class FSDPFunctionalSAMTrainer(Trainer):
                 del batch_cpu, cur_logit_grad
 
             # scale the accumulated gradients
-            for p in self.model.parameters():
-                if p.grad is not None:
-                    p.grad.div_(num_microbatches)
+            #for p in self.model.parameters():
+            #    if p.grad is not None:
+            #        p.grad.div_(num_microbatches)
 
 
             self.accumulated_inputs = []
