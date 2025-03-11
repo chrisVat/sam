@@ -212,7 +212,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                         
                         self.optimizer.first_step_functional(zero_grad=True) # , warmup=global_step<=MIN_WARMUP_STEPS)
                         
-                        if self.optimizer.precondition:
+                        if self.optimizer.precondition and LOW_GPU:
                             self.optimizer.move_adamw_second_moment_to_cpu(second_only=True)
                             
                         #rank0_print(f"Post Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")

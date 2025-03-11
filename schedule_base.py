@@ -14,6 +14,7 @@ from sam_functional import FunctionalSAM
 from torch.nn.parallel import DistributedDataParallel as DDP
 import os
 from utils import is_running_distributed
+from custom_trainer_default import CustomTrainer
 
 
 class Schedule:
@@ -197,7 +198,7 @@ class Schedule:
         elif self.sam_mode == "preconfsam":
             trainer_cls = FSDPFunctionalSAMTrainer
         else:
-            trainer_cls = Trainer
+            trainer_cls = CustomTrainer
 
         """
         trainer_cls = Seq2SeqTrainer if "t5" in self.model.__class__.__name__ else Trainer
@@ -250,9 +251,11 @@ class Schedule:
         if self.sam_mode == "no":
             trainer = trainer_cls(
                 model=self.model,
-                tokenizer=self.tokenizer,
                 args=self.training_args,
-                **data_module,
+                train_dataset=data_module["train_dataset"],
+                eval_dataset=data_module.get("eval_dataset", None),
+                data_collator=data_module["data_collator"],
+                tokenizer=self.tokenizer,
                 optimizers=(optimizer, lr_scheduler),
             )
         else:

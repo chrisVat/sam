@@ -3,8 +3,6 @@ from torch.optim import AdamW
 from transformers import Trainer, get_scheduler
 from tqdm.auto import tqdm
 import torch.distributed as dist
-from sam_functional import FunctionalSAM
-#from sam_functional_preconditioned import PreconditionedFunctionalSAM
 from utils import rank0_print
 import torch.nn.functional as F
 import gc
@@ -15,62 +13,115 @@ import datetime
 import os
 from consts import LLAMA_IGNORE_INDEX
 import numpy as np
+import inspect
+import contextlib
+from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from transformers.trainer_callback import TrainerState
+from utils import load_ddp_state_dict
+import numpy as np
+import random
+import math
+from utils import is_running_distributed
+from transformers.utils import is_datasets_available
+from transformers.trainer_utils import seed_worker, has_length
+from torch.utils.data import DataLoader, RandomSampler
+from transformers.trainer_pt_utils import LengthGroupedSampler
+from transformers.optimization import get_scheduler
 
-LOG_PRED_LOSS = True
-LOG_FOLDER = "loss_logs/"
-
-if not os.path.exists(LOG_FOLDER):
-    os.makedirs(LOG_FOLDER)
+if is_datasets_available():
+    import datasets
 
 
- # 2,3 for retraining for 05
 
-class DefaultTrainer(Trainer):
-    def __init__(self, *args, **kwargs):
+LOW_GPU = True
+
+
+class CustomTrainer(Trainer):
+    def __init__(self, *args, sam_mode="no", sam_rho=0.05, sam_adaptive=False, **kwargs):
         super().__init__(*args, **kwargs)
-        self.label_smoother = LabelSmoother(epsilon=self.args.label_smoothing_factor)
         self.global_step = 0 
-        self.vjp_preallocated = None
+        self.my_label_smoother = LabelSmoother(epsilon=self.args.label_smoothing_factor, ignore_index=LLAMA_IGNORE_INDEX)
 
-        #print(kwargs)
-        #print(type(kwargs))
-        #print(kwargs['args'])
-        #print(kwargs['args'].run_name)
-        #exit()
-
+        if not hasattr(self.model, "no_sync"): # not the best practices, i just want this to work quickly.
+            self.model.no_sync = contextlib.nullcontext
+        
         gpu_rank = dist.get_rank() if dist.is_initialized() else 0
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_filename = f"training_log_rank{gpu_rank}_{kwargs['args'].run_name.replace("/", "")}_{timestamp}.txt"
-        self.log_file_path = os.path.join(LOG_FOLDER, log_filename)
+
+
+    # nanfriendly version.
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        with self.autocast_smart_context_manager():
+            outputs = model(**inputs)
+            loss = outputs.loss
+            if num_items_in_batch is not None:
+                loss = loss / num_items_in_batch
+
+        # Check for NaN on the tensor
+        if torch.isnan(loss).any():
+            print("NaN Loss detected.")
+            loss = torch.zeros_like(loss)
+
+        return (loss, outputs) if return_outputs else loss
+
+
+    def sync_grads(self):
+        for p in self.model.parameters():
+            if p.grad is not None:
+                dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+                p.grad /= dist.get_world_size()
+
+
+    def load_checkpoint(self, checkpoint_path):
+        optimizer_path = os.path.join(checkpoint_path, "optimizer.pt")
+        scheduler_path = os.path.join(checkpoint_path, "scheduler.pt")
+        self.optimizer.load_state_dict(torch.load(optimizer_path, map_location="cpu")) #, map_location=self.model.device))
+        self.lr_scheduler.load_state_dict(torch.load(scheduler_path, map_location="cpu")) #, map_location=self.model.device))
+        self.model.load_state_dict(load_ddp_state_dict(checkpoint_path))
+        checkpoint_state_file = os.path.join(checkpoint_path, "trainer_state.json")
+        self.state = TrainerState.load_from_json(checkpoint_state_file)
+        self._load_rng_state(checkpoint_path)
 
 
     def get_minibatch_gradients(self, inputs):
-        #rank0_print(f"Getting minibatch - Allocated: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
-        prepared_inputs = self._prepare_inputs(inputs)
-        #self.accumulated_inputs.append(prepared_inputs)  # Save for later perturb pass
+            prepared_inputs = self._prepare_inputs(inputs)
+            labels = prepared_inputs.get("labels")
 
-        labels = prepared_inputs.get("labels")
+            with self.autocast_smart_context_manager():
+                outputs = self.model(**prepared_inputs, return_dict=True)
+                logits = outputs.logits
+                parameter_loss = self.my_label_smoother(outputs, labels, shift_labels=True)
 
-        with self.autocast_smart_context_manager():
-            outputs = self.model(**prepared_inputs)
-            logits = outputs.logits
-            parameter_loss = self.label_smoother(outputs, labels, shift_labels=True)
+            parameter_loss = parameter_loss / self.accum_steps
 
-        parameter_loss = parameter_loss / self.accum_steps
+            self.accelerator.backward(parameter_loss)
 
-        self.accelerator.backward(parameter_loss)
-        return 
+            if not torch.isnan(parameter_loss):
+                self.total_loss = self.total_loss + parameter_loss.item() 
+                self.accumulated_pred_loss = self.accumulated_pred_loss + parameter_loss.item()
+            return 
 
-    # core training loop for functional sam
+
+
     def _inner_training_loop(self, *args, **kwargs):
-        #print("!!!!!!!\n\n\n!!!!!!!!\n\n\n!!!!! Inner training loop!!!!!!!")
         #eval_results = self.evaluate()
         #self.log(eval_results)
         #rank0_print(f"Initial evaluation results: {eval_results}")
+        #rank0_print(f"Pre Load GPU Usage: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+        
+        # load first so there's no random orderings with loading checkpoints
+        train_dataloader = self.get_train_dataloader()
+
+        
+        print("Train Dataloader", train_dataloader)
+        print("train loader length: ", len(train_dataloader))
+    
+
+        with torch.no_grad():
+            if self.custom_load_dir is not None:
+                self.load_checkpoint(self.custom_load_dir)
 
         self.model.train() 
-        train_dataloader = self.get_train_dataloader()
-        print("Train Dataloader", train_dataloader)
+
 
         accum_steps = (
             self.args.gradient_accumulation_steps
@@ -84,92 +135,107 @@ class DefaultTrainer(Trainer):
 
         progress_bar = tqdm(
             total=total_updates_per_epoch * int(self.args.num_train_epochs),
-            desc=f"Rank {dist.get_rank()} Training",
+            desc=f"Rank {dist.get_rank() if is_running_distributed() else 0} Training",
         )
+
         self.total_loss = 0.0
-        global_step = 0
+        global_step = getattr(self.state, "global_step", 0)
+
+        cur_steps = -1
+
+        if self.custom_load_dir is not None:
+            torch.cuda.empty_cache()
+            self.optimizer.zero_grad()
+            self.model.zero_grad()
+
+        #rank0_print(f"Starting GPU Usage: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
 
         for epoch in range(int(self.args.num_train_epochs)):
             self.cur_epoch = epoch
-            #rank0_print(f"Epoch: {epoch}")
-            #rank0_print(f"model training: {self.model.training}")
 
             self.epoch_loss = 0.0
             num_batches = 0
             updates_this_epoch = 0
             self.accumulated_pred_loss = 0.0
 
+            num_accums_cur = 0
 
             for inputs in train_dataloader:                
-                self.get_minibatch_gradients(inputs)
-                #rank0_print(f"Get Minibatch Gradients - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
-            
-                if len(self.accumulated_inputs) == accum_steps:
-                    """
-                    for p in self.model.parameters():
-                        if p.grad is not None:
-                            dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
-                            p.grad /= dist.get_world_size()
-                    """
-                    total_grad_sum = 0.0
-                    for p in self.model.parameters():
-                        if p.grad is not None:
-                            total_grad_sum += p.grad.sum()
+                cur_steps += 1
+                # skip ahead if we are loading from a checkpoint
+                if cur_steps < global_step*accum_steps: 
+                    if cur_steps % accum_steps == 0 and cur_steps > 0:
+                        progress_bar.update(1)
+                    del inputs
+                    continue
 
-                    print(f"Rank {dist.get_rank()} total grad sum: {total_grad_sum.item()}")
+                
 
+                #rank0_print(f"Getting Minibatch - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                with self.model.no_sync():
+                    self.get_minibatch_gradients(inputs)
+
+                num_accums_cur += 1
+
+                #rank0_print(f"Post Computing Minibatch Gradients - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
+                
+                if  num_accums_cur == accum_steps: # accum_steps
+                    num_accums_cur = 0
+                    if is_running_distributed():
+                        self.sync_grads()
                     
+                    cur_grad_norm = model_grad_l2_norm(self.model)
                     self.optimizer.step()
                     self.model.zero_grad()
                     self.optimizer.zero_grad()
+
                     num_batches += 1
 
-                    if self.lr_scheduler is not None:
+                    # only step for rank 0
+                    if self.lr_scheduler is not None and (not is_running_distributed() or dist.get_rank() == 0):
                         self.lr_scheduler.step()
                     global_step += 1
                     updates_this_epoch += 1
-                    epoch_float = epoch + (updates_this_epoch / total_updates_per_epoch)
+                    epoch_float = epoch + ((global_step % total_updates_per_epoch) / total_updates_per_epoch)
 
                     self.epoch_loss += self.accumulated_pred_loss
 
                     logs = {
-                        "pred_loss": round(self.accumulated_pred_loss, 4),
+                        "loss": round(self.accumulated_pred_loss, 4),
                         "avg_epoch_loss": round((self.epoch_loss / num_batches), 4),
-                        "learning_rate": round(self.lr_scheduler.get_last_lr()[0], 6) if self.lr_scheduler else None,
+                        "learning_rate": self.lr_scheduler.get_last_lr()[0] if self.lr_scheduler else None,
                         "epoch": round(epoch_float, 2),
+                        "grad_norm": round(cur_grad_norm, 9),
                     }
                     self.state.global_step = global_step
-
-                    logs["rank"] = dist.get_rank()
+                    self.callback_handler.on_log(self.args, self.state, self.control, logs)
                     print(logs)
 
                     if self.state.global_step % self.args.save_steps == 0:
-                        if dist.get_rank() == 0:
+                        if not is_running_distributed() or dist.get_rank() == 0:
                             print("Saving model checkpoint at global step: ", self.state.global_step)
                             with self.model.no_sync():
                                 self._save_checkpoint(self.model, trial=None)
                         else:
                             self.store_flos()
-
                     self.accumulated_pred_loss = 0.0  # Reset logging accumulator.
                     progress_bar.update(1)
                     progress_bar.set_postfix(logs)
 
             if self.args.eval_strategy == "epoch" and self.eval_dataset is not None:
-                print(f"Epoch {epoch+1} finished on rank {dist.get_rank()}. Awaiting evaluation...")
+                print(f"Epoch {epoch+1} finished. Awaiting evaluation...")
                 if torch.distributed.is_initialized():
                     torch.distributed.barrier()
-                    
                     self.model.zero_grad(set_to_none=True)  # Free gradient memory
                     torch.cuda.synchronize()
                 
                 self.can_return_loss = True
                 rank0_print("*** Beginning Evaluation ***")
-                with torch.no_grad():
+                with torch.no_grad(): 
                     self.model.eval()
                     eval_results = self.evaluate()
                     self.model.train()
-
+                
                 rank0_print(f"Epoch {epoch+1} evaluation results: {eval_results}")
                 
                 eval_results = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in eval_results.items()}
@@ -195,25 +261,9 @@ class DefaultTrainer(Trainer):
 
             def base_optimizer_fn(param_groups):
                 return AdamW(param_groups, lr=lr, weight_decay=wd)
+            
+            self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=wd)
 
-            if self.sam_mode == "fsam":
-                self.optimizer = FunctionalSAM(
-                    self.model.parameters(),
-                    base_optimizer=base_optimizer_fn,
-                    rho=self.sam_rho,
-                    adaptive=self.sam_adaptive,
-                    precondition=False
-                )
-            elif self.sam_mode == "preconfsam":
-                self.optimizer = FunctionalSAM(
-                    self.model.parameters(),
-                    base_optimizer=base_optimizer_fn,
-                    rho=self.sam_rho,
-                    adaptive=self.sam_adaptive,
-                    precondition=True
-                )
-            else:
-                self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=wd)
 
     def create_scheduler(self, num_training_steps: int):
         if self.lr_scheduler is None:
@@ -223,6 +273,70 @@ class DefaultTrainer(Trainer):
                 num_warmup_steps=int(self.args.warmup_ratio * num_training_steps),
                 num_training_steps=num_training_steps,
             )
+
+    def _get_train_sampler(self):
+        if self.train_dataset is None or not has_length(self.train_dataset):
+            return None
+
+        # Ensure that a shared generator exists.
+        if not hasattr(self, "_generator"):
+            self._generator = torch.Generator()
+            self._generator.manual_seed(42)
+        generator = self._generator
+
+
+        # Build the sampler.
+        if self.args.group_by_length:
+            if is_datasets_available() and isinstance(self.train_dataset, datasets.Dataset):
+                lengths = (
+                    self.train_dataset[self.args.length_column_name]
+                    if self.args.length_column_name in self.train_dataset.column_names
+                    else None
+                )
+            else:
+                lengths = None
+            model_input_name = (
+                self.processing_class.model_input_names[0] if self.processing_class is not None else None
+            )
+            return LengthGroupedSampler(
+                self.args.train_batch_size * self.args.gradient_accumulation_steps,
+                dataset=self.train_dataset,
+                lengths=lengths,
+                model_input_name=model_input_name,
+                generator=generator
+            )
+
+        else:
+            return RandomSampler(self.train_dataset, generator=generator)
+
+    def get_train_dataloader(self):
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+
+        train_dataset = self.train_dataset
+        data_collator = self.data_collator
+        if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
+            train_dataset = self._remove_unused_columns(train_dataset, description="training")
+        else:
+            data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
+
+        dataloader_params = {
+            "batch_size": self._train_batch_size,
+            "collate_fn": data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
+        }
+
+        if not isinstance(train_dataset, torch.utils.data.IterableDataset):
+            dataloader_params["sampler"] = self._get_train_sampler()
+            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["worker_init_fn"] = seed_worker
+            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
+
+        return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
+
+
 
 
 def model_grad_l2_norm(model):
