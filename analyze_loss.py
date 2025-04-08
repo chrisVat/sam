@@ -3,8 +3,8 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 
-SAM_CONFIG = "res/fsam-0.05-pythia-70m-deduped-100-oneshot-130k_mathinstruct_phi-2_3epochs_512_4checkpoints/output/"
-DEFAULT_CONFIG = "res/default-pythia-70m-deduped-100-oneshot-130k_mathinstruct_phi-2_3epochs_512_final/output/"
+SAM_CONFIG = "res/preconfsam-0.10-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32_backup/output/"
+DEFAULT_CONFIG = "res/default-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32_proper_backup/output/"
 
 OUTPUT_DIR = "np_cache_analysis"
 if not os.path.exists(OUTPUT_DIR):
@@ -27,7 +27,7 @@ def boxplot_losses(sam_losses, default_losses, steps):
         cur_default = default_losses[i]
 
         # boxplot
-        plt.boxplot([cur_sam, cur_default], labels=["SAM", "Default"])
+        plt.boxplot([cur_sam, cur_default], labels=["PreFuncSAM", "Default"])
         plt.title(f"Checkpoint {step}")
         plt.ylabel("Loss")
         plt.savefig(f"{OUTPUT_DIR}/checkpoint_{step}.png")
@@ -47,7 +47,7 @@ def plot_full_percentiles(sam_losses, default_losses, steps):
             default_percentiles.append(np.percentile(cur_default, percentile))
 
         #plot it
-        plt.plot(percentiles, sam_percentiles, label="SAM")
+        plt.plot(percentiles, sam_percentiles, label="PreFuncSAM")
         plt.plot(percentiles, default_percentiles, label="AdamW")
         plt.title(f"Checkpoint {step} Loss Percentiles")
         plt.xlabel("Percentile")
@@ -62,30 +62,32 @@ def plot_small_percentiles(sam_losses, default_losses, steps):
         cur_sam = sam_losses[i]
         cur_default = default_losses[i]
 
-        percentiles = [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10]
 
-        sam_percentiles = []
-        default_percentiles = []
-        for percentile in percentiles:
-            sam_percentiles.append(np.percentile(cur_sam, percentile))
-            default_percentiles.append(np.percentile(cur_default, percentile))
+        for i in range(5):
+            percentiles = [i for i in range(i*20, i*20+20, 1)]
 
-        plt.plot(percentiles, sam_percentiles, label="SAM")
-        plt.plot(percentiles, default_percentiles, label="AdamW")
-        plt.title(f"Checkpoint {step} Loss Percentiles")
-        plt.xlabel("Percentile")
-        plt.ylabel("Loss")
-        plt.legend()
-        plt.savefig(f"{OUTPUT_DIR}/small_percentiles_checkpoint_{step}.png")
-        plt.close()
+            sam_percentiles = []
+            default_percentiles = []
+            for percentile in percentiles:
+                sam_percentiles.append(np.percentile(cur_sam, percentile))
+                default_percentiles.append(np.percentile(cur_default, percentile))
+
+            plt.plot(percentiles, sam_percentiles, label="PreFuncSAM")
+            plt.plot(percentiles, default_percentiles, label="AdamW")
+            plt.title(f"Checkpoint {step} Loss Percentiles")
+            plt.xlabel("Percentile")
+            plt.ylabel("Loss")
+            plt.legend()
+            plt.savefig(f"{OUTPUT_DIR}/small_percentiles_checkpoint_{step}_{i}.png")
+            plt.close()
 
 
 def analyze_losses(sam_losses, default_losses, steps):
     # steps is the common checkpoint numbers
-    
-    #boxplot_losses(sam_losses, default_losses, steps)
-    # plot_full_percentiles(sam_losses, default_losses, steps)
-    #plot_small_percentiles(sam_losses, default_losses, steps)
+
+    boxplot_losses(sam_losses, default_losses, steps)
+    plot_full_percentiles(sam_losses, default_losses, steps)
+    plot_small_percentiles(sam_losses, default_losses, steps)
     for i, step in enumerate(steps):
         cur_sam = sam_losses[i]
         cur_default = default_losses[i]
@@ -109,7 +111,7 @@ def analyze_losses(sam_losses, default_losses, steps):
         plt.legend()
         plt.colorbar(label='Count')
         plt.title(f"Checkpoint {step} Losses", fontsize=18)
-        plt.xlabel("SAM Loss", fontsize=14)
+        plt.xlabel("PreFuncSAM Loss", fontsize=14)
         plt.ylabel("AdamW Loss", fontsize=14)
         plt.xlim(0, max_loss)
         plt.ylim(0, max_loss)
@@ -142,12 +144,13 @@ def analyze_losses(sam_losses, default_losses, steps):
 
 
 
-def main():
+def main():    
     sam_ints = get_checkpoint_list(SAM_CONFIG)
     default_ints = get_checkpoint_list(DEFAULT_CONFIG)
     #print(f"SAM: {sam_ints}")
     #print(f"Default: {default_ints}")
     to_use = list(set(sam_ints) & set(default_ints))
+    to_use = [5000]
     #print(f"Common: {to_use}")
     sam_losses = []
     default_losses = []
@@ -169,6 +172,9 @@ def main():
     else:
         sam_losses = np.load(f"{OUTPUT_DIR}/sam_losses.npy")
         default_losses = np.load(f"{OUTPUT_DIR}/default_losses.npy")
+    
+    print("sam losses average: ", np.mean(sam_losses))
+    print("default losses average: ", np.mean(default_losses))
 
     analyze_losses(sam_losses, default_losses, to_use)
 

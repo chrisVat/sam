@@ -3,7 +3,7 @@ model_name_or_path: microsoft/phi-2 # microsoft/Phi-3-mini-4k-instruct  # path t
 cache_dir: /data2/chris/data/huggingface_models
 model_max_length: 512
 schedule_name: Full
-result_dir_name: default-mathinstruct_phi-2_3epochs_512-1gpu_lr2e-5_bs32
+result_dir_name: default-mathinstruct_phi-2_3epochs_512-1gpu_lr2e-5_bs32_proper
 sam_mode: "no"
 sam_rho: 0.
 sam_adaptive: false
@@ -31,3 +31,6 @@ train_args:
   group_by_length: TRUE
   full_determinism: TRUE
   seed: 42
+
+load_from: "default-mathinstruct_phi-2_3epochs_512-1gpu_lr2e-5_bs32_proper"
+load_step: 5000

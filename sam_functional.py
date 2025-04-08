@@ -3,7 +3,7 @@ from utils import rank0_print
 
 
 class FunctionalSAM(torch.optim.Optimizer):
-    def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, precondition=False, **kwargs):
+    def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, precondition=False, schedule="constant", schedule_warmup=0.33, rho_min=0.05, **kwargs):
         print("This ran!, precondition is ", precondition)
         assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
         defaults = dict(rho=rho, adaptive=adaptive, **kwargs)
@@ -15,9 +15,15 @@ class FunctionalSAM(torch.optim.Optimizer):
         self.last_grad_norm = None  # Store the last computed grad norm
         self.precondition = precondition
         self.rho = rho
+        self.rho_max = rho
+        self.schedule = schedule
+        self.schedule_warmup = schedule_warmup
+        self.rho_min = rho_min
         self.kwargs = kwargs
         self.device = self.param_groups[0]["params"][0].device
         self.adaptive = False
+        self.cur_step = 0
+        self.max_steps = 0
         print("Using functional SAM - RHO Is .", self.rho)
         self.has_preallocated = False
 
@@ -64,6 +70,13 @@ class FunctionalSAM(torch.optim.Optimizer):
         if not self.has_preallocated:
             self._preallocate_model()
         
+        if self.schedule == "linear":
+            if self.cur_step < self.schedule_warmup * self.max_steps:
+                self.rho = self.rho_max * (1 - (self.cur_step / (self.schedule_warmup * self.max_steps))) + self.rho_min
+            else: 
+                self.rho = self.rho_max
+
+
         for group in self.param_groups:
             scale = self.rho / (grad_norm + 1e-12)
             for p in group["params"]:
@@ -94,9 +107,9 @@ class FunctionalSAM(torch.optim.Optimizer):
         #rank0_print(f"Transferred back from old - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
         self.has_preallocated = False
 
-        self.base_optimizer.step()  # update weights using the second gradient
-        if zero_grad:
-            self.zero_grad()
+        #self.base_optimizer.step()  # update weights using the second gradient
+        #if zero_grad:
+        #    self.zero_grad()
 
 
     @torch.no_grad()

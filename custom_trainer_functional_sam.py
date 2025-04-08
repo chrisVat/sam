@@ -29,16 +29,17 @@ from torch.utils.data import DataLoader, RandomSampler
 from transformers.trainer_pt_utils import LengthGroupedSampler
 from transformers.optimization import get_scheduler
 
+
 if is_datasets_available():
     import datasets
 
 
 
-LOW_GPU = True
+LOW_GPU = False
 
 
 class FSDPFunctionalSAMTrainer(Trainer):
-    def __init__(self, *args, sam_mode="no", sam_rho=0.05, sam_adaptive=False, **kwargs):
+    def __init__(self, *args, sam_mode="no", sam_rho=0.05, sam_adaptive=False, schedule="constant", schedule_warmup=0.33, rho_min=0.05, **kwargs):
         super().__init__(*args, **kwargs)
         self.sam_mode = sam_mode
         self.sam_rho = sam_rho
@@ -46,6 +47,9 @@ class FSDPFunctionalSAMTrainer(Trainer):
         self.my_label_smoother = LabelSmoother(epsilon=self.args.label_smoothing_factor, ignore_index=LLAMA_IGNORE_INDEX)
         self.global_step = 0 
         self.vjp_preallocated = None
+        self.sam_schedule = schedule
+        self.sam_schedule_warmup = schedule_warmup
+        self.rho_min = rho_min
 
         if not hasattr(self.model, "no_sync"): # not the best practices, i just want this to work quickly.
             self.model.no_sync = contextlib.nullcontext
@@ -69,6 +73,22 @@ class FSDPFunctionalSAMTrainer(Trainer):
             loss = torch.zeros_like(loss)
 
         return (loss, outputs) if return_outputs else loss
+
+    def get_minibatch_loss(self, inputs):
+        prepared_inputs = self._prepare_inputs(inputs)
+        labels = prepared_inputs.get("labels")
+
+        with self.autocast_smart_context_manager():
+            outputs = self.model(**prepared_inputs, return_dict=True)
+            logits = outputs.logits
+            parameter_loss = self.my_label_smoother(outputs, labels, shift_labels=True)
+
+        parameter_loss = parameter_loss
+
+        if torch.isnan(parameter_loss):
+            parameter_loss = torch.tensor(0.0, device=self.model.device)
+
+        return parameter_loss.item()
 
 
     def get_minibatch_gradients(self, inputs):
@@ -108,6 +128,25 @@ class FSDPFunctionalSAMTrainer(Trainer):
         return 
 
 
+    def my_evaluate(self, eval_dataset=None, ignore_keys=None):
+        with torch.no_grad():
+            eval_dataloader = self.get_eval_dataloader(eval_dataset)
+
+            progress_bar = tqdm(eval_dataloader, desc="Evaluation")
+            total_loss = 0.0
+            num_batches = 0
+            num_examples = 0
+            for inputs in progress_bar:
+                with torch.no_grad():
+                    cur_loss = self.get_minibatch_loss(inputs)
+                    total_loss += cur_loss
+                    num_examples += len(inputs["input_ids"])
+                num_batches += 1
+            
+            eval_loss = total_loss / num_examples
+            return {"eval_loss": eval_loss}
+
+
     def sync_grads(self):
         for p in self.model.parameters():
             if p.grad is not None:
@@ -127,7 +166,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
 
 
 
-    def _inner_training_loop(self, *args, **kwargs):
+    def _inner_training_loop(self, *args, **kwargs):        
         #eval_results = self.evaluate()
         #self.log(eval_results)
         #rank0_print(f"Initial evaluation results: {eval_results}")
@@ -145,7 +184,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
             if self.custom_load_dir is not None:
                 self.load_checkpoint(self.custom_load_dir)
 
-        self.model.train() 
+        #self.model.train() 
 
 
         accum_steps = (
@@ -167,6 +206,10 @@ class FSDPFunctionalSAMTrainer(Trainer):
         global_step = getattr(self.state, "global_step", 0)
 
         cur_steps = -1
+
+        self.lr_scheduler = self.create_scheduler(num_training_steps=total_updates_per_epoch * int(self.args.num_train_epochs))
+        self.optimizer.max_steps = total_updates_per_epoch * int(self.args.num_train_epochs)
+
 
         if self.custom_load_dir is not None:
             torch.cuda.empty_cache()
@@ -192,6 +235,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                 if cur_steps < global_step*accum_steps: 
                     if cur_steps % accum_steps == 0 and cur_steps > 0:
                         progress_bar.update(1)
+                        self.lr_scheduler.step()
                     del inputs
                     continue
 
@@ -206,13 +250,13 @@ class FSDPFunctionalSAMTrainer(Trainer):
                         self.sync_grads()
                     with self.model.no_sync():
                         #rank0_print(f"Pre Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
-                        
+                        self.optimizer.cur_step = global_step // accum_steps
                         if self.optimizer.precondition and LOW_GPU:
                             self.optimizer.move_adamw_second_moment_to_gpu(second_only=True)
                         
                         self.optimizer.first_step_functional(zero_grad=True) # , warmup=global_step<=MIN_WARMUP_STEPS)
                         
-                        if self.optimizer.precondition:
+                        if self.optimizer.precondition and LOW_GPU:
                             self.optimizer.move_adamw_second_moment_to_cpu(second_only=True)
                             
                         #rank0_print(f"Post Perturbation - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
@@ -242,6 +286,9 @@ class FSDPFunctionalSAMTrainer(Trainer):
 
                     #rank0_print(f"Final Step - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                     self.optimizer.final_step(zero_grad=True, restore_old=False)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.optimizer.base_optimizer.step()
+                    
                     #rank0_print(f"Post Final Step - GPU memory: {torch.cuda.memory_allocated() / 1e9:.3f} GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.3f} GB")
                     if LOW_GPU:
                         self.optimizer.move_adamw_second_moment_to_cpu()
@@ -281,6 +328,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                         "learning_rate": self.lr_scheduler.get_last_lr()[0] if self.lr_scheduler else None,
                         "epoch": round(epoch_float, 2),
                         "grad_norm": round(cur_grad_norm, 9),
+                        "rho": round(self.optimizer.rho, 4),
                     }
                     self.state.global_step = global_step
                     self.callback_handler.on_log(self.args, self.state, self.control, logs)
@@ -302,15 +350,17 @@ class FSDPFunctionalSAMTrainer(Trainer):
                 print(f"Epoch {epoch+1} finished. Awaiting evaluation...")
                 if torch.distributed.is_initialized():
                     torch.distributed.barrier()
-                    self.model.zero_grad(set_to_none=True)  # Free gradient memory
+                    self.model.zero_grad()  # Free gradient memory
                     torch.cuda.synchronize()
                 
                 self.can_return_loss = True
                 rank0_print("*** Beginning Evaluation ***")
                 with torch.no_grad(): 
                     self.model.eval()
-                    eval_results = self.evaluate()
-                    self.model.train()
+                    self.model.zero_grad()
+                    eval_results = self.my_evaluate()
+                    self.model.train()                
+                self.can_return_loss = False
                 
                 rank0_print(f"Epoch {epoch+1} evaluation results: {eval_results}")
                 
@@ -318,7 +368,7 @@ class FSDPFunctionalSAMTrainer(Trainer):
                 self.log(eval_results)
                 #del eval_results
 
-                self.model.zero_grad(set_to_none=True)  # Free gradient memory
+                self.model.zero_grad()  # Free gradient memory
                 torch.cuda.synchronize()
                 #gc.collect()
                 time.sleep(5)
@@ -344,7 +394,10 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     base_optimizer=base_optimizer_fn,
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
-                    precondition=False
+                    precondition=False,
+                    schedule=self.sam_schedule,
+                    schedule_warmup=self.sam_schedule_warmup,
+                    rho_min=self.rho_min,
                 )
             elif self.sam_mode == "preconfsam":
                 self.optimizer = FunctionalSAM(
@@ -352,20 +405,27 @@ class FSDPFunctionalSAMTrainer(Trainer):
                     base_optimizer=base_optimizer_fn,
                     rho=self.sam_rho,
                     adaptive=self.sam_adaptive,
-                    precondition=True
+                    precondition=True,
+                    schedule=self.sam_schedule,
+                    schedule_warmup=self.sam_schedule_warmup,
+                    rho_min=self.rho_min,
                 )
             else:
                 self.optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=wd)
 
 
-    def create_scheduler(self, num_training_steps: int):
-        if self.lr_scheduler is None:
+    def create_scheduler(self, num_training_steps: int, recreate=True):
+        print("Creating Scheduler with training steps: ", num_training_steps)
+        print("Warmup steps: ", int(self.args.warmup_ratio * num_training_steps))
+        print("Num training steps: ", num_training_steps)
+        if self.lr_scheduler is None or recreate:
             self.lr_scheduler = get_scheduler(
                 name=self.args.lr_scheduler_type,
                 optimizer=self.optimizer,
                 num_warmup_steps=int(self.args.warmup_ratio * num_training_steps),
                 num_training_steps=num_training_steps,
             )
+        return self.lr_scheduler
 
     @torch.no_grad()
     def second_step_functional(self):

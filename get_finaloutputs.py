@@ -27,7 +27,7 @@ class LengthSortedBatchSampler(Sampler):
         return (len(self.indices) + self.batch_size - 1) // self.batch_size
 
 
-def loss(data, model, batch_size=32):
+def activations(data, model, batch_size=32):
     """Compute per-example loss with batching and compare to model's result.loss.
     This version manually shifts the logits/labels to match the model's internal loss computation.
     """
@@ -35,7 +35,7 @@ def loss(data, model, batch_size=32):
     model.eval()
     
     #losses = []
-    losses = {}
+    activations = {}
     collator = data["data_collator"]
     dataloader = DataLoader(data["train_dataset"], 
                             #batch_size=batch_size, 
@@ -52,22 +52,18 @@ def loss(data, model, batch_size=32):
             labels = batch["labels"].cuda()
             example_ids = batch["id"]
 
-            result = model(input_ids=input_ids, labels=labels, return_dict=True)
-            #batch_loss = result.loss  # Scalar loss from the model
-            
-            logits = result.logits 
-            shifted_logits = logits[:, :-1, :].contiguous()
-            shifted_labels = labels[:, 1:].contiguous()
+            result = model(input_ids=input_ids, return_dict=True, output_hidden_states=True)
 
-            loss_fn = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
-            per_token_loss = loss_fn(shifted_logits.view(-1, shifted_logits.size(-1)), shifted_labels.view(-1))
-            per_token_loss = per_token_loss.view(shifted_labels.shape)
-            
-            valid_mask = shifted_labels != -100
-            per_example_losses = per_token_loss.sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
-            
-            # extend losses 
-            losses.update({example_id: per_example_loss.detach().cpu() for example_id, per_example_loss in zip(example_ids, per_example_losses)})
+            final_activations = result.hidden_states[-1]
+
+            print(f"***** Activations shape: {final_activations.shape}")
+            exit()
+
+            # Save or process activations here
+            for example_id, activation in zip(example_ids, final_activations):
+                # You could reduce over sequence length (e.g., mean pooling) if you want a per-example vector
+                activation_vector = activation.mean(dim=0).detach().cpu()
+                activations[example_id] = activation_vector
 
             #for i, example_id in enumerate(example_ids):
             #    losses[example_id] = per_example_losses[i].detach().cpu() #.item()
@@ -79,9 +75,9 @@ def loss(data, model, batch_size=32):
             #    losses.append(per_example_loss.detach().cpu())
     
     # convert losses to a list
-    losses = [losses[k] for k in sorted(losses.keys())]
+    activations = [activations[k] for k in sorted(activations.keys())]
     
-    return losses
+    return activations
 
 
 def main(model_path, config_file=None, ckpt=-1):
@@ -100,7 +96,7 @@ def main(model_path, config_file=None, ckpt=-1):
         else:
             model_path = args["output_dir_root"]+f"/checkpoint-{ckpt}"
             
-        loss_file = f"{model_path}/losses.pt"
+        activations_file = f"{model_path}/activations.pt"
     else:
         # HuggingFace model path logic
         args = {
@@ -114,10 +110,10 @@ def main(model_path, config_file=None, ckpt=-1):
         
         # Create a default output directory for HF models
         os.makedirs("hf_outputs", exist_ok=True)
-        loss_file = f"hf_outputs/{model_path.replace('/', '_')}_losses.pt"
+        activations_file = f"hf_outputs/{model_path.replace('/', '_')}_activations.pt"
 
-    if os.path.exists(loss_file):
-        rank0_print(f"***** Losses already exist at {loss_file}!")
+    if os.path.exists(activations_file):
+        rank0_print(f"***** Activations already exist at {activations_file}!")
         return # add me back!
     
     """
@@ -142,7 +138,7 @@ def main(model_path, config_file=None, ckpt=-1):
     rank0_print(f'***** smart_tokenizer_and_embedding_resize done!')
     all_data = make_supervised_data_module(tokenizer=tokenizer, data_path=args["full_data_path"])
 
-    mean_entropies_all = loss(data=all_data, model=model)
+    activations_all = activations(data=all_data, model=model)
 
     # load file (it exists)
     #old_mean_entropies_all = torch.load(loss_file)
@@ -154,8 +150,8 @@ def main(model_path, config_file=None, ckpt=-1):
     #exit()
 
 
-    torch.save(mean_entropies_all, loss_file)
-    print(f"***** Losses saved to {loss_file}")      
+    torch.save(activations_all, activations_file)
+    print(f"***** Losses saved to {activations_file}")      
       
 
 def loss_old(data, model):

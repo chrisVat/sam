@@ -14,6 +14,7 @@ from sam_functional import FunctionalSAM
 from torch.nn.parallel import DistributedDataParallel as DDP
 import os
 from utils import is_running_distributed
+from custom_trainer_default import CustomTrainer
 
 
 class Schedule:
@@ -33,7 +34,7 @@ class Schedule:
         if 'load_from' in args:
             self.load_from = args.pop('load_from')
             self.load_from = f"res/{self.load_from}/output"
-            if 'laod_step' in args:
+            if 'load_step' in args:
                 self.load_step = args.pop('load_step')
         
         
@@ -70,9 +71,9 @@ class Schedule:
 
 
             # use keep only for train data and val data
-            #keep_only, keep_only_train = 500, 250
-            #train_data = train_data.select(range(keep_only_train))
-            #val_data = val_data.select(range(keep_only))
+            keep_only, keep_only_train = 500, 250
+            train_data = train_data.select(range(keep_only_train))
+            val_data = val_data.select(range(keep_only))
             
             self.train_data = [train_data[i] for i in range(len(train_data))]
             self.val_data = [val_data[i] for i in range(len(val_data))]
@@ -108,6 +109,9 @@ class Schedule:
         self.sam_mode = args.get("sam_mode", "no")
         self.sam_rho = args.get("sam_rho", 0.05)
         self.sam_adaptive = args.get("sam_adaptive", False)
+        self.sam_schedule = args.get("sam_schedule", "constant")
+        self.sam_schedule_warmup = args.get("sam_schedule_warmup", 0)
+        self.sam_rho_min = args.get("sam_rho_min", 0)
 
     def initialize_labeled_data(self):
         """Randomly init labeled pool"""
@@ -197,7 +201,7 @@ class Schedule:
         elif self.sam_mode == "preconfsam":
             trainer_cls = FSDPFunctionalSAMTrainer
         else:
-            trainer_cls = Trainer
+            trainer_cls = CustomTrainer
 
         """
         trainer_cls = Seq2SeqTrainer if "t5" in self.model.__class__.__name__ else Trainer
@@ -250,9 +254,11 @@ class Schedule:
         if self.sam_mode == "no":
             trainer = trainer_cls(
                 model=self.model,
-                tokenizer=self.tokenizer,
                 args=self.training_args,
-                **data_module,
+                train_dataset=data_module["train_dataset"],
+                eval_dataset=data_module.get("eval_dataset", None),
+                data_collator=data_module["data_collator"],
+                tokenizer=self.tokenizer,
                 optimizers=(optimizer, lr_scheduler),
             )
         else:
@@ -267,6 +273,9 @@ class Schedule:
                 sam_mode=self.sam_mode,
                 sam_rho=self.sam_rho,
                 sam_adaptive=self.sam_adaptive,
+                schedule=self.sam_schedule,
+                schedule_warmup=self.sam_schedule_warmup,
+                rho_min=self.sam_rho_min,
             )
 
         rank0_print(f"*** Sampler Type: {type(trainer.get_train_dataloader().sampler)}")
@@ -316,7 +325,10 @@ class Schedule:
                 base_optimizer=base_optimizer_fn,
                 rho=self.sam_rho,
                 adaptive=self.sam_adaptive,
-                precondition=False
+                precondition=False,
+                schedule=self.sam_schedule,
+                schedule_warmup=self.sam_schedule_warmup,
+                rho_min=self.sam_rho_min,
             )
         elif self.sam_mode == "preconfsam":
             optimizer = FunctionalSAM(
@@ -324,7 +336,10 @@ class Schedule:
                 base_optimizer=base_optimizer_fn,
                 rho=self.sam_rho,
                 adaptive=self.sam_adaptive,
-                precondition=True
+                precondition=True, 
+                schedule=self.sam_schedule,
+                schedule_warmup=self.sam_schedule_warmup,
+                rho_min=self.sam_rho_min,
             )
 
 

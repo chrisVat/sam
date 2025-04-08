@@ -10,7 +10,7 @@ import torch
 from utils import is_running_distributed
 
 
-ESTABLISH_KILLSWITCH = False
+ESTABLISH_KILLSWITCH = True
 if ESTABLISH_KILLSWITCH:
     from killswitch import setup_killswitch
     setup_killswitch()

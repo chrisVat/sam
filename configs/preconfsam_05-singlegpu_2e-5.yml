@@ -1,15 +1,15 @@
 full_data_path: TIGER-Lab/MathInstruct
 model_name_or_path: microsoft/phi-2 # microsoft/Phi-3-mini-4k-instruct  # path to pretrained foundation llm
-cache_dir: /home/chrisv/cache/
-model_max_length: 512
+cache_dir: /data2/chris/data/huggingface_models
+model_max_length: 900
 schedule_name: Full
-result_dir_name: preconfsam-0.05-mathinstruct_phi-2_3epochs_512-1gpu_lr2e-5_bs32
+result_dir_name: preconfsam-0.05-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32
 sam_mode: "preconfsam"
 sam_rho: 0.05
 sam_adaptive: false
 
 train_args:
-  gradient_checkpointing: TRUE
+  #gradient_checkpointing: TRUE
   optim: adamw_torch
   num_train_epochs: 3
   per_device_train_batch_size: 1
@@ -33,7 +33,7 @@ train_args:
   full_determinism: TRUE
   seed: 42
 
-#load_from: "preconfsam-0.05-pythia-70m-deduped-100-oneshot-130k_mathinstruct_phi-2_3epochs_900-singlegpu_lr5e-6propersave"
+load_from: "preconfsam-0.05-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32"
 
 
-gradient_checkpointing: TRUE
+#gradient_checkpointing: TRUE

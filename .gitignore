@@ -5,3 +5,4 @@ wandb/
 loss_logs/*
 *.txt
 np_cache_analysis/*
+configs/*
