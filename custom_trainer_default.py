@@ -401,6 +401,70 @@ class CustomTrainer(Trainer):
 
 
 
+    def _get_train_sampler(self):
+        if self.train_dataset is None or not has_length(self.train_dataset):
+            return None
+
+        # Ensure that a shared generator exists.
+        if not hasattr(self, "_generator"):
+            self._generator = torch.Generator()
+            self._generator.manual_seed(42)
+        generator = self._generator
+
+
+        # Build the sampler.
+        if self.args.group_by_length:
+            if is_datasets_available() and isinstance(self.train_dataset, datasets.Dataset):
+                lengths = (
+                    self.train_dataset[self.args.length_column_name]
+                    if self.args.length_column_name in self.train_dataset.column_names
+                    else None
+                )
+            else:
+                lengths = None
+            model_input_name = (
+                self.processing_class.model_input_names[0] if self.processing_class is not None else None
+            )
+            return LengthGroupedSampler(
+                self.args.train_batch_size * self.args.gradient_accumulation_steps,
+                dataset=self.train_dataset,
+                lengths=lengths,
+                model_input_name=model_input_name,
+                generator=generator
+            )
+
+        else:
+            return RandomSampler(self.train_dataset, generator=generator)
+
+    def get_train_dataloader(self):
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+
+        train_dataset = self.train_dataset
+        data_collator = self.data_collator
+        if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
+            train_dataset = self._remove_unused_columns(train_dataset, description="training")
+        else:
+            data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
+
+        dataloader_params = {
+            "batch_size": self._train_batch_size,
+            "collate_fn": data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
+        }
+
+        if not isinstance(train_dataset, torch.utils.data.IterableDataset):
+            dataloader_params["sampler"] = self._get_train_sampler()
+            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["worker_init_fn"] = seed_worker
+            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
+
+        return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
+
+
+
 
 def model_grad_l2_norm(model):
     total_norm = torch.norm(
