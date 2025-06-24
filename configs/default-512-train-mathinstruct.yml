@@ -32,5 +32,5 @@ train_args:
   full_determinism: TRUE
   seed: 42
 
-load_from: "default-mathinstruct_phi-2_3epochs_512-1gpu_lr2e-5_bs32_proper"
-load_step: 5000
+#load_from: "default-mathinstruct_phi-2_3epochs_512-1gpu_lr2e-5_bs32_proper"
+#load_step: 5000

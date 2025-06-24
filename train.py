@@ -2,12 +2,17 @@ import argparse
 import os
 import yaml
 
-from schedules import Full
+from schedules import Full, S2L, S2LUpsample, S2LCoLM
 from utils import get_tokenizer, smart_tokenizer_and_embedding_resize, get_model, rank0_print
 import torch.distributed as dist
 import datetime
 import torch
 from utils import is_running_distributed
+
+# CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=29511 train.py --config_file configs/a1_debug-run-s2lupsample.yml --wandb_key $WANDB_KEY > s2lup_0.txt
+# CUDA_VISIBLE_DEVICES=1 torchrun --nproc_per_node=1 --master_port=29512 train.py --config_file configs/a2_debug-run-s2lupsample.yml --wandb_key $WANDB_KEY > s2lup_1.txt
+# CUDA_VISIBLE_DEVICES=2 torchrun --nproc_per_node=1 --master_port=29513 train.py --config_file configs/a3_debug-run-s2lupsample.yml --wandb_key $WANDB_KEY > s2lup_2.txt
+# CUDA_VISIBLE_DEVICES=3 torchrun --nproc_per_node=1 --master_port=29514 train.py --config_file configs/a4_debug-run-s2lupsample.yml --wandb_key $WANDB_KEY > s2lup_3.txt
 
 
 ESTABLISH_KILLSWITCH = True
@@ -28,6 +33,15 @@ if is_running_distributed():
 def get_schedule(schedule_name):
     if schedule_name == "Full":
         return Full
+    elif schedule_name == "S2L":
+        return S2L
+    elif schedule_name == "S2LCoLM":
+        return S2LCoLM
+    elif schedule_name == "S2LUpsample":
+        return S2LUpsample
+    else:
+        raise ValueError(f"Unknown schedule name: {schedule_name}")
+
     
 def set_default_values(args):
     # set default values
@@ -64,6 +78,7 @@ def main(config_file):
 
     # Initialize model and tokenizer
     model = get_model(model_name_or_path=args["model_name_or_path"], cache_dir=args["cache_dir"])
+    
     rank0_print('*** Model initialized!')
     
     tokenizer, special_tokens_dict = get_tokenizer(
@@ -91,6 +106,8 @@ def main(config_file):
     # Initialize data
     schedule.initialize_labeled_data()
     
+    #print("outer check for per example usage:", schedule.per_example_usages)
+
     schedule.save_labeled_unlabeled_data()
     rank0_print(f"*** Training-Data-Size = {len(schedule.labeled_idx[schedule.labeled_idx==True])}")
     rank0_print(f"*** Batch Size = {args['train_args']['per_device_train_batch_size'] * args['train_args']['gradient_accumulation_steps']}")

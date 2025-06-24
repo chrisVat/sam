@@ -12,8 +12,6 @@ import torch.nn.functional as F
 
 from torch.utils.data import Sampler, DataLoader
 
-VAL = True
-
 
 class LengthSortedBatchSampler(Sampler):
     def __init__(self, dataset, batch_size):
@@ -29,7 +27,7 @@ class LengthSortedBatchSampler(Sampler):
         return (len(self.indices) + self.batch_size - 1) // self.batch_size
 
 
-def loss(data, model, batch_size=32):
+def gradients(data, model, batch_size=32):
     """Compute per-example loss with batching and compare to model's result.loss.
     This version manually shifts the logits/labels to match the model's internal loss computation.
     """
@@ -39,55 +37,45 @@ def loss(data, model, batch_size=32):
     #losses = []
     losses = {}
     collator = data["data_collator"]
-    source = "train_dataset" #if not VAL else "eval_dataset"
-    print("data keys: ", data.keys())
-
-    eval_dataset = data[source]
-    print("eval dataset: ", eval_dataset)
-    print("len eval dataset: ", len(eval_dataset))
-    #exit()
-
-    dataloader = DataLoader(data[source], 
+    dataloader = DataLoader(data["train_dataset"], 
                             #batch_size=batch_size, 
                             #shuffle=False, 
                             collate_fn=collator,
-                            batch_sampler=LengthSortedBatchSampler(data[source], batch_size)
+                            batch_sampler=LengthSortedBatchSampler(data["train_dataset"], batch_size)
                             )
     
-    #n = 16
-    #run_first_n_losses(data, model, n)
-    with torch.no_grad():
-        for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
-            input_ids = batch["input_ids"].cuda()
-            labels = batch["labels"].cuda()
-            example_ids = batch["id"]
 
-            result = model(input_ids=input_ids, labels=labels, return_dict=True)
-            #batch_loss = result.loss  # Scalar loss from the model
-            
-            logits = result.logits 
-            shifted_logits = logits[:, :-1, :].contiguous()
-            shifted_labels = labels[:, 1:].contiguous()
+    for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
+        input_ids = batch["input_ids"].cuda()
+        labels = batch["labels"].cuda()
+        example_ids = batch["id"]
 
-            loss_fn = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
-            per_token_loss = loss_fn(shifted_logits.view(-1, shifted_logits.size(-1)), shifted_labels.view(-1))
-            per_token_loss = per_token_loss.view(shifted_labels.shape)
-            
-            valid_mask = shifted_labels != -100
-            per_example_losses = per_token_loss.sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
-            
-            # extend losses 
-            losses.update({example_id: per_example_loss.detach().cpu() for example_id, per_example_loss in zip(example_ids, per_example_losses)})
+        result = model(input_ids=input_ids, labels=labels, return_dict=True)
+        #batch_loss = result.loss  # Scalar loss from the model
+        
+        logits = result.logits 
+        shifted_logits = logits[:, :-1, :].contiguous()
+        shifted_labels = labels[:, 1:].contiguous()
 
-            #for i, example_id in enumerate(example_ids):
-            #    losses[example_id] = per_example_losses[i].detach().cpu() #.item()
-            
-            
-            #losses.extend(per_example_losses.detach().cpu())
+        loss_fn = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
+        per_token_loss = loss_fn(shifted_logits.view(-1, shifted_logits.size(-1)), shifted_labels.view(-1))
+        per_token_loss = per_token_loss.view(shifted_labels.shape)
+        
+        valid_mask = shifted_labels != -100
+        per_example_losses = per_token_loss.sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
+        
+        # extend losses 
+        losses.update({example_id: per_example_loss.detach().cpu() for example_id, per_example_loss in zip(example_ids, per_example_losses)})
 
-            #for per_example_loss in per_example_losses:
-            #    losses.append(per_example_loss.detach().cpu())
-    
+        #for i, example_id in enumerate(example_ids):
+        #    losses[example_id] = per_example_losses[i].detach().cpu() #.item()
+        
+        
+        #losses.extend(per_example_losses.detach().cpu())
+
+        #for per_example_loss in per_example_losses:
+        #    losses.append(per_example_loss.detach().cpu())
+
     # convert losses to a list
     losses = [losses[k] for k in sorted(losses.keys())]
     
@@ -95,8 +83,6 @@ def loss(data, model, batch_size=32):
 
 
 def main(model_path, config_file=None, ckpt=-1):
-    loss_file_name = "losses.pt" if not VAL else "val_losses.pt"
-    
     if config_file:
         # Local model path logic
         with open(config_file, 'r') as f:
@@ -111,8 +97,8 @@ def main(model_path, config_file=None, ckpt=-1):
             model_path = args["output_dir_root"]+f"/"
         else:
             model_path = args["output_dir_root"]+f"/checkpoint-{ckpt}"
-
-        loss_file = f"{model_path}/{loss_file_name}" 
+            
+        loss_file = f"{model_path}/losses.pt"
     else:
         # HuggingFace model path logic
         args = {
@@ -126,7 +112,7 @@ def main(model_path, config_file=None, ckpt=-1):
         
         # Create a default output directory for HF models
         os.makedirs("hf_outputs", exist_ok=True)
-        loss_file = f"hf_outputs/{model_path.replace('/', '_')}_{loss_file_name}" 
+        loss_file = f"hf_outputs/{model_path.replace('/', '_')}_losses.pt"
 
     if os.path.exists(loss_file):
         rank0_print(f"***** Losses already exist at {loss_file}!")
@@ -152,8 +138,6 @@ def main(model_path, config_file=None, ckpt=-1):
                                                             tokenizer=tokenizer, 
                                                             model=model)  # fix tokenizer's special_token_maps
     rank0_print(f'***** smart_tokenizer_and_embedding_resize done!')
-    
-    
     all_data = make_supervised_data_module(tokenizer=tokenizer, data_path=args["full_data_path"])
 
     mean_entropies_all = loss(data=all_data, model=model)
@@ -179,10 +163,8 @@ def loss_old(data, model):
     
     losses = []
     
-    source = "train_dataset" if not VAL else "eval_dataset"
-
     with torch.no_grad():
-        for _,datapoint in tqdm(enumerate(data[source]), total=len(data[source])):
+        for _,datapoint in tqdm(enumerate(data["train_dataset"]), total=len(data["train_dataset"])):
             input_ids = datapoint["input_ids"].unsqueeze(0).cuda()
             labels = datapoint["labels"].unsqueeze(0).cuda()
             result = model(input_ids=input_ids, labels=labels, return_dict=True)
@@ -199,9 +181,8 @@ def run_first_n_losses(data, model, n):
     
     losses = []
     
-    source = "train_dataset" if not VAL else "eval_dataset"
     with torch.no_grad():
-        for _,datapoint in enumerate(data[source]):
+        for _,datapoint in enumerate(data["train_dataset"]):
             input_ids = datapoint["input_ids"].unsqueeze(0).cuda()
             labels = datapoint["labels"].unsqueeze(0).cuda()
             result = model(input_ids=input_ids, labels=labels, return_dict=True)
@@ -225,27 +206,20 @@ if __name__ == '__main__':
     
     #args.config_file = './configs/default-900-train-mathinstruct.yml'
     #args.config_file = './configs/preconfsam_10-singlegpu_2e-5.yml'
-    #args.config_file = './configs/default-900-train-mathinstruct-sg-mini.yml'
+    #args.config_file = './configs/preconfsam_05-singlegpu_2e-5.yml'
+    args.config_file = './configs/default-900-train-mathinstruct-sg-mini.yml'
     #args.config_file = './configs/preconfsam_10-singlegpu-mini.yml'
-
-    args.config_file = './configs/small_proxy.yml'
-    #args.config_file = './configs/s2l-preconfsam_05-singlegpu_2e-5.yml'
-
+    
     #args.ckpt = 5000
-    args.ckpt = 12000
+    args.ckpt = None
     args.model_path = None 
 
-    #main(model_path=args.model_path, config_file=args.config_file, ckpt=args.ckpt)
-    #exit()
 
-    inc = 2000
+    inc = 1000
     start_ckpt = 1000
-    while start_ckpt <= 25000:
+    while start_ckpt <= 8000:
         args.ckpt = start_ckpt
         main(model_path=args.model_path, config_file=args.config_file, ckpt=args.ckpt)
         start_ckpt += inc
 
-    #main(model_path=args.model_path, config_file=args.config_file, ckpt=args.ckpt)
-
-
-    # CUDA_VISIBLE_DEVICES=0 python get_trajectories.py
+    main(model_path=args.model_path, config_file=args.config_file, ckpt=args.ckpt)

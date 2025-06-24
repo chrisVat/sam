@@ -6,6 +6,10 @@ import matplotlib.pyplot as plt
 SAM_CONFIG = "res/preconfsam-0.10-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32_backup/output/"
 DEFAULT_CONFIG = "res/default-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32_proper_backup/output/"
 
+SAM_CONFIG = "res/s2l-preconfsam-0.05-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32/output/"
+DEFAULT_CONFIG = "res/default-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32_proper/output/"
+
+
 OUTPUT_DIR = "np_cache_analysis"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
@@ -150,17 +154,20 @@ def main():
     #print(f"SAM: {sam_ints}")
     #print(f"Default: {default_ints}")
     to_use = list(set(sam_ints) & set(default_ints))
-    to_use = [5000]
+    to_use = [12000]
     #print(f"Common: {to_use}")
     sam_losses = []
     default_losses = []
+    VAL = True
+    loss_file_name = "val_losses.pt" if VAL else "losses.pt"
+
     if not os.path.exists(f"{OUTPUT_DIR}/sam_losses.npy"):
         for i in to_use:
-            cur_sam_losses = torch.load(f"{SAM_CONFIG}/checkpoint-{i}/losses.pt")
+            cur_sam_losses = torch.load(f"{SAM_CONFIG}/checkpoint-{i}/{loss_file_name}")
             cur_sam_losses = [loss.item() for loss in cur_sam_losses]
             sam_losses.append(cur_sam_losses)
 
-            cur_default_losses = torch.load(f"{DEFAULT_CONFIG}/checkpoint-{i}/losses.pt")
+            cur_default_losses = torch.load(f"{DEFAULT_CONFIG}/checkpoint-{i}/{loss_file_name}")
             cur_default_losses = [loss.item() for loss in cur_default_losses]
             default_losses.append(cur_default_losses)
         sam_losses = [loss for loss in sam_losses]        
@@ -173,8 +180,25 @@ def main():
         sam_losses = np.load(f"{OUTPUT_DIR}/sam_losses.npy")
         default_losses = np.load(f"{OUTPUT_DIR}/default_losses.npy")
     
+    #val_indices = np.load("val_indices.npy")
+    #print(f"val_indices: {val_indices.max(), val_indices.min()}")
+    print(f"sam_losses shape: {sam_losses.shape}")
+    print(f"default_losses shape: {default_losses.shape}")
+    #sam_losses = sam_losses[:, val_indices]
+    #default_losses = default_losses[:, val_indices]    
+
+    # get percentage that are 0
+    sam_zero = np.sum(sam_losses == 0) / (sam_losses.shape[0] * sam_losses.shape[1])
+    default_zero = np.sum(default_losses == 0) / (default_losses.shape[0] * default_losses.shape[1])
+    print(f"sam zero: {sam_zero:.4f}")
+    print(f"default zero: {default_zero:.4f}")
+
     print("sam losses average: ", np.mean(sam_losses))
     print("default losses average: ", np.mean(default_losses))
+
+
+
+
 
     analyze_losses(sam_losses, default_losses, to_use)
 

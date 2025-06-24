@@ -1,5 +1,0 @@
-{'pred_loss': 0.9736, 'avg_epoch_loss': 0.7165, 'learning_rate': 4.5454545454545457e-07, 'epoch': 2}
-{'pred_loss': 1.2323, 'avg_epoch_loss': 0.8884, 'learning_rate': 6.818181818181818e-07, 'epoch': 3}
-{'pred_loss': 1.7242, 'avg_epoch_loss': 1.0974, 'learning_rate': 9.090909090909091e-07, 'epoch': 4}
-{'pred_loss': 2.0027, 'avg_epoch_loss': 1.2784, 'learning_rate': 1.1363636363636364e-06, 'epoch': 5}
-

@@ -236,8 +236,8 @@ class SupervisedDataset(Dataset):
 
             #val_data = split_dataset["test"]
 
-            keep_only, keep_only_train = 500, 250
-            list_data_dict = [list_data_dict[i] for i in range(keep_only_train)]
+            #keep_only, keep_only_train = 500, 250
+            #list_data_dict = [list_data_dict[i] for i in range(keep_only_train)]
             
             self.train_data = [list_data_dict[i] for i in range(len(list_data_dict))]
         elif 'Asclepius' in data_path:

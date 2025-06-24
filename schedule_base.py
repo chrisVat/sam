@@ -2,7 +2,8 @@ import numpy as np
 import json
 import torch
 from datasets import load_dataset
-from transformers import Trainer, TrainingArguments, Seq2SeqTrainer, Seq2SeqTrainingArguments, get_scheduler, AdamW
+from transformers import Trainer, TrainingArguments, Seq2SeqTrainer, Seq2SeqTrainingArguments, get_scheduler
+from torch.optim import AdamW
 from utils import jload, jdump, make_supervised_data_module, get_model, rank0_print
 from sam import SAM
 #from functional_sam import PreconditionedFunctionalSAM
@@ -15,6 +16,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import os
 from utils import is_running_distributed
 from custom_trainer_default import CustomTrainer
+
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
+from torch.distributed.fsdp.fully_sharded_data_parallel import MixedPrecision
 
 
 class Schedule:
@@ -38,7 +43,6 @@ class Schedule:
                 self.load_step = args.pop('load_step')
         
         
-        
         # load full-sized source data -> for indexing all samples
         if self.full_data_path.endswith(".jsonl"):
             with open(self.full_data_path, "r") as f:
@@ -52,28 +56,24 @@ class Schedule:
                 self.train_data = json.load(f)
         elif "MathInstruct" in self.full_data_path:
             raw_dataset = load_dataset(self.full_data_path)["train"]
-            #dataset_shuffled = raw_dataset.shuffle(seed=42)
-            #train_num = int(len(dataset_shuffled) * 0.95)
-            #train_data = dataset_shuffled.select(range(train_num))
-            #val_data = dataset_shuffled.select(range(train_num, len(dataset_shuffled)))
-
-            # split_dataset = raw_dataset.train_test_split(test_size=0.05, seed=42)
-
+            #raw_dataset = raw_dataset.add_column("original_idx", list(range(len(raw_dataset))))
             dataset = raw_dataset.shuffle(seed=42)
             train_num = int(len(dataset)*0.95)
             train_data = dataset.select(range(train_num))
             val_data = dataset.select(range(train_num, len(dataset)))
 
-
-
-            #train_data = split_dataset["train"]
-            #val_data = split_dataset["test"]
+            #val_indices = val_data["original_idx"]
+            #val_indices_path = f"val_indices.npy"
+            #if not is_running_distributed() or torch.distributed.get_rank() == 0:
+            #    np.save(val_indices_path, val_indices)
+            #    rank0_print(f"*** val_indices saved to {val_indices_path}")
+            #exit()
 
 
             # use keep only for train data and val data
-            keep_only, keep_only_train = 500, 250
-            train_data = train_data.select(range(keep_only_train))
-            val_data = val_data.select(range(keep_only))
+            #keep_only, keep_only_train = 500, 250
+            #train_data = train_data.select(range(keep_only_train))
+            #val_data = val_data.select(range(keep_only))
             
             self.train_data = [train_data[i] for i in range(len(train_data))]
             self.val_data = [val_data[i] for i in range(len(val_data))]
@@ -174,7 +174,8 @@ class Schedule:
         return unlabeled_data_module
     
     def train(self):
-        data_module = self.get_updated_train_data()
+        data_module = self.get_updated_train_data()       
+        
         # sanity-check
         if not is_running_distributed() or torch.distributed.get_rank() == 0:
             for sanity_sample in data_module["train_dataset"]:
@@ -203,31 +204,7 @@ class Schedule:
         else:
             trainer_cls = CustomTrainer
 
-        """
-        trainer_cls = Seq2SeqTrainer if "t5" in self.model.__class__.__name__ else Trainer
-        trainer = trainer_cls(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            args=self.training_args,
-            **data_module,
-            optimizers=(optimizer, lr_scheduler),
-        )
-        """
-
-        # print model layers, (get fc layer name)
-        #print(self.model)
-        #exit()
-
         self.training_args.remove_unused_columns = False
-
-        if is_running_distributed():
-            local_rank = torch.distributed.get_rank()
-            self.model.to(local_rank)
-
-            if torch.distributed.get_world_size() > 1:
-                self.model = DDP(self.model, device_ids=[local_rank], output_device=local_rank)
-        else: # set to first available gpu
-            self.model.to("cuda:0")
 
 
         if self.load_from:
@@ -251,32 +228,64 @@ class Schedule:
                 print(f"Loading from checkpoint: {checkpoint_dir}")
 
         #exit()
-        if self.sam_mode == "no":
-            trainer = trainer_cls(
-                model=self.model,
-                args=self.training_args,
-                train_dataset=data_module["train_dataset"],
-                eval_dataset=data_module.get("eval_dataset", None),
-                data_collator=data_module["data_collator"],
-                tokenizer=self.tokenizer,
-                optimizers=(optimizer, lr_scheduler),
+        #print("training args: ", self.training_args)
+        # self.model = self.model.cpu()
+
+        def get_auto_wrap_policy(threshold=1e6):
+            def policy(module, recurse, nonwrapped_numel):
+                return sum(p.numel() for p in module.parameters()) >= threshold
+            return policy
+
+        """
+        if self.training_args.fsdp:
+            self.model = FSDP(
+                self.model.cpu(),
+                auto_wrap_policy=get_auto_wrap_policy(threshold=1e6),
+                mixed_precision=MixedPrecision(param_dtype=torch.bfloat16),
+                device_id=torch.cuda.current_device(),
             )
+        """
+        training_args = {
+            'model': self.model,
+            'args': self.training_args,
+            'train_dataset': data_module["train_dataset"],
+            'eval_dataset': data_module.get("eval_dataset", None),
+            'data_collator': data_module["data_collator"],
+            'tokenizer': self.tokenizer,
+        }
+        if not self.training_args.fsdp:
+            training_args["optimizers"] = (optimizer, lr_scheduler)
         else:
-            trainer = trainer_cls(
-                model=self.model,
-                args=self.training_args,
-                train_dataset=data_module["train_dataset"],
-                eval_dataset=data_module.get("eval_dataset", None),
-                data_collator=data_module["data_collator"],
-                tokenizer=self.tokenizer,
-                optimizers=(optimizer, lr_scheduler),
-                sam_mode=self.sam_mode,
-                sam_rho=self.sam_rho,
-                sam_adaptive=self.sam_adaptive,
-                schedule=self.sam_schedule,
-                schedule_warmup=self.sam_schedule_warmup,
-                rho_min=self.sam_rho_min,
+            """
+            auto_wrap_policy = transformer_auto_wrap_policy(self.training_args.fsdp_config)
+            training_args["fsdp"] = True
+            self.model = FSDP(
+                self.model,
+                auto_wrap_policy=auto_wrap_policy,
+                mixed_precision=MixedPrecision(param_dtype=torch.bfloat16),  # optional
             )
+            """
+
+        # add per_examples_usages to training_args
+        #training_args["per_example_usages"] = self.per_example_usages if hasattr(self, 'per_example_usages') else None
+
+
+        if self.sam_mode == "no":
+            trainer = trainer_cls(**training_args)
+        else:
+            additional_training_args = {
+                'sam_mode': self.sam_mode,
+                'sam_rho': self.sam_rho,
+                'sam_adaptive': self.sam_adaptive,
+                'schedule': self.sam_schedule,
+                'schedule_warmup': self.sam_schedule_warmup,
+                'rho_min': self.sam_rho_min,
+            }
+            training_args.update(additional_training_args)
+            trainer = trainer_cls(**training_args)
+
+        trainer.per_example_usages = self.per_example_usages if hasattr(self, 'per_example_usages') else None
+        print("in schedule base, checking for per_example_usages", trainer.per_example_usages)
 
         rank0_print(f"*** Sampler Type: {type(trainer.get_train_dataloader().sampler)}")
 
@@ -291,10 +300,11 @@ class Schedule:
         trainer.save_model(output_dir=output_dir)
         
         # check if we need ddp saving
-        if torch.distributed.get_world_size() <= 1:
-            self.model.save_pretrained(f"{output_dir}/pretrained")
-        else:
-            self.model.module.save_pretrained(f"{output_dir}/pretrained")
+        #if torch.distributed.get_world_size() <= 1:
+        #    self.model.save_pretrained(f"{output_dir}/pretrained")
+        #else:
+        #    self.model.module.save_pretrained(f"{output_dir}/pretrained")
+        self.model.save_pretrained(f"{output_dir}/pretrained")
 
     def _create_optimizer_and_scheduler(self, train_dataset):
         lr = self.training_args.learning_rate

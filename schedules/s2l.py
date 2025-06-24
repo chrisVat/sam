@@ -30,9 +30,11 @@ class S2L(Schedule):
                 print(f"*** {ckpt} ** Loading losses...")
                 try:
                     losses.append(torch.tensor(torch.load(f"{ckpt}/losses.pt")))
-                except:
-                    print(f"*** {ckpt} ** Could not load losses.")
-                    continue
+                # print the error
+                except Exception as e:
+                    print(f"*** {ckpt} ** Could not load losses: {e}")
+                #if len(losses) > 4:
+                #    break
                 
             if (args["num_loss_ckpts"] > -1) and (len(losses) > args["num_loss_ckpts"]):
                 losses = np.stack(losses)
@@ -53,11 +55,15 @@ class S2L(Schedule):
     
     def initialize_labeled_data(self):
         """initialize labeled data"""
+        #print(f"*** Rank = {torch.distributed.get_rank()}, ** Initializing labeled data...")
         num = self.init_label_num
         if torch.distributed.get_rank() == 0:
             # rank the sources by the number of samples
             sources, counts = np.unique(self.sources, return_counts=True)
             sorted_idx = np.argsort(counts)
+
+            #print("sources:", sources, "\ncounts:", counts)
+            #print("sorted_idx:", sorted_idx)
             
             # equally sample n samples from different sources
             sampled_indices = []
@@ -65,11 +71,13 @@ class S2L(Schedule):
                 n_per_source = num // (len(sorted_idx) - i)
                 indices = np.where(self.sources == sources[sorted_idx[i]])[0]
                 if len(indices) > n_per_source:
+                    #print("running faiss 1:")
                     new_indices = self.faiss_kmeans_selection(self.losses[indices], n_per_source)
                     sampled_indices.append(indices[new_indices])
                     num -= n_per_source
                     print(f"Sampled {n_per_source} samples from source {sources[sorted_idx[i]]} with max loss trajectory coverage")
                 else:
+                    #print("running faiss 2:")
                     sampled_indices.append(indices)
                     num -= len(indices)
                     print(f"Sampled {len(indices)} samples from source {sources[sorted_idx[i]]}")
@@ -79,6 +87,7 @@ class S2L(Schedule):
             self.labeled_idx[sampled_indices] = True
 
     def query(self, n, use_model_path):
+        print(f"Query {n} samples from unlabeled data")
         unlabeled_idx = torch.arange(self.n_pool)[~self.labeled_idx.bool()]  # # current unlabeled_idx
         
         # rank the sources by the number of samples
@@ -90,6 +99,7 @@ class S2L(Schedule):
         for i in range(len(sorted_idx)):
             n_per_source = n // (len(sorted_idx) - i)
             indices = np.where(self.sources == sources[sorted_idx[i]])[0]
+            print(f"*** Rank = {torch.distributed.get_rank()}, ** Source {sources[sorted_idx[i]]} has {len(indices)} samples")
             if len(indices) > n_per_source:
                 new_indices = self.faiss_kmeans_selection(self.losses[indices], n_per_source)
                 sampled_indices.append(indices[new_indices])
@@ -108,8 +118,11 @@ class S2L(Schedule):
         """
         K-means selection
         """
+        #print(f"*** Rank = {torch.distributed.get_rank()}, **K-means selection...")
         import faiss
         start_time = time.time()
+        #print("n_components:", self.n_components)
+        #print("features shape:", features.shape)
         kmeans = faiss.Kmeans(features.shape[1], self.n_components, niter=20, verbose=True)
         kmeans.train(features.numpy())
         
