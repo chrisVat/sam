@@ -5,7 +5,6 @@ wandb/
 loss_logs/*
 *.txt
 np_cache_analysis/*
-configs/*
 dataset_usage/*
 figs/*
 hf_outputs/*
@@ -22,3 +21,4 @@ wandb/*
 np_cache_analysis*
 *.png
 .npy
+upsampled_trajectories/*

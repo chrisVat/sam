@@ -1,0 +1,45 @@
+full_data_path: TIGER-Lab/MathInstruct
+model_name_or_path: EleutherAI/pythia-70m # microsoft/Phi-3-mini-4k-instruct  # path to pretrained foundation llm
+cache_dir: /data/huggingface_models
+model_max_length: 512
+
+#ref_model_path: res/preconfsam-0.10-mini-4k-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32/output/
+#loss_priority_alpha: 0.5
+#source_balance_beta: 0.25
+#max_unique: 0.8
+#max_dup_per_example: 10
+
+schedule_name: Full
+#result_dir_name: default-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32_proper_backup
+result_dir_name: proxy-full-train
+sam_mode: "no"
+sam_rho: 0.
+sam_adaptive: false
+
+train_args:
+  optim: adamw_torch
+  num_train_epochs: 3
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 32
+  eval_strategy: "epoch"
+  save_strategy: "steps"
+  save_steps: 500
+  save_total_limit: 100
+  learning_rate: 2.0e-5
+  weight_decay: 0.
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  logging_steps: 1
+  #fsdp: "full_shard auto_wrap" 
+  #fsdp_config: 
+  #  transformer_layer_cls_to_wrap: "torch.nn.TransformerDecoderLayer" # "Phi3DecoderLayer"
+  bf16: TRUE
+  tf32: TRUE
+  group_by_length: FALSE # TRUE
+  full_determinism: TRUE
+  seed: 42
+  max_grad_norm: 1.0
+
+#load_from: "default-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32_proper_backup"
+#load_step: 3500

@@ -2,7 +2,7 @@ import argparse
 import os
 import yaml
 
-from schedules import Full, S2L, S2LUpsample, S2LCoLM
+from schedules import Full, S2L, S2LUpsample
 from utils import get_tokenizer, smart_tokenizer_and_embedding_resize, get_model, rank0_print
 import torch.distributed as dist
 import datetime
@@ -36,7 +36,7 @@ def get_schedule(schedule_name):
     elif schedule_name == "S2L":
         return S2L
     elif schedule_name == "S2LCoLM":
-        return S2LCoLM
+        raise NotImplementedError("S2LCoLM schedule is not implemented yet.")
     elif schedule_name == "S2LUpsample":
         return S2LUpsample
     else:

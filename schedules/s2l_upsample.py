@@ -1,7 +1,11 @@
 import torch, numpy as np, glob, os, sys
 sys.path.insert(0, os.path.abspath('.'))
 from schedule_base import Schedule
+from tqdm import tqdm
+import faiss
+import matplotlib.pyplot as plt
 
+VISUALIZE_TRAJECTORIES = True
 
 class S2LUpsample(Schedule):
     def __init__(self, model, tokenizer, args):
@@ -17,11 +21,21 @@ class S2LUpsample(Schedule):
 
         losses = []
 
-        for ck in glob.glob(f'{args["ref_model_path"]}/*'):
+        max_checkpoints = 100
+
+        all_checkpoints = glob.glob(f'{args["ref_model_path"]}/*')
+        # sort on number in checkpoint-"number"
+        all_checkpoints.sort(key=lambda x: int(os.path.basename(x).split('-')[1])) 
+
+        for ck in tqdm(all_checkpoints):
+            print("Loading losses from checkpoint:", ck)
             try:
                 losses.append(torch.tensor(torch.load(os.path.join(ck, "losses.pt"))))
             except Exception as e:
                 print(f"Could not load {ck}/losses.pt: {e}")
+            if len(losses) >= max_checkpoints:
+                print(f"Reached max checkpoints ({max_checkpoints}), stopping loading.")
+                break
         
         print("self.losses:", len(losses), "losses loaded from checkpoints")        
         if not losses:
@@ -32,6 +46,8 @@ class S2LUpsample(Schedule):
 
         self.losses   = self.losses[self.train_idx]
         self.loss_vec = self.losses.mean(1)
+        # set labeled idx to 1
+        self.labeled_idx = torch.zeros(self.n_pool, dtype=bool)  
 
     # ------------------------------------------------------------------
     def initialize_labeled_data(self):
@@ -57,6 +73,7 @@ class S2LUpsample(Schedule):
             
             indices = np.where(self.sources == sources[sorted_source_idx[i]])[0]
             per_example_usages[indices] = 1 
+            self.labeled_idx[indices] = True
 
             if num_source_examples < average_example_per_source:
                 # upsample all per_example_usages to upsample_amount + 1
@@ -64,7 +81,26 @@ class S2LUpsample(Schedule):
                 per_example_usages[indices] = int(self.upsample_amount + 1)
             else:
                 new_indices = self.faiss_kmeans_selection(self.losses[indices], self.num_cluster)
+                print(f"Selected {len(new_indices)} indices from {num_source_examples} examples in source {sources[sorted_source_idx[i]]} for upsampling.")
                 per_example_usages[new_indices] = int(self.upsample_amount + 1)
+
+                if VISUALIZE_TRAJECTORIES:
+                    if not os.path.exists("upsampled_trajectories"):
+                        os.makedirs("upsampled_trajectories")
+                    # plot the loss trajectores for selected as red and unselected as blue
+                    import matplotlib.pyplot as plt
+                    plt.figure(figsize=(10, 5))
+                    plt.title(f"Loss Trajectories for {sources[sorted_source_idx[i]]} (selected in red)")
+                    plt.xlabel("Loss Checkpoints")
+                    plt.ylabel("Loss Value")
+                    for j in range(num_source_examples):
+                        if j in new_indices:
+                            plt.plot(self.losses[indices[j]], color='red', alpha=0.5, label='Selected' if j == 0 else "")
+                        else:
+                            plt.plot(self.losses[indices[j]], color='blue', alpha=0.5, label='Unselected' if j == 0 else "")
+                    plt.legend()
+                    plt.savefig(f"upsampled_trajectories/loss_trajectories_source{sorted_source_idx[i]}.png")
+
 
         self.per_example_usages = per_example_usages
 
@@ -79,7 +115,7 @@ class S2LUpsample(Schedule):
         # losses: shape (N, T) — N examples, T loss checkpoints
         assert losses.ndim == 2, "Expected losses of shape (num_examples, num_checkpoints)"
         
-        x = losses.astype(np.float32)
+        x = losses.detach().cpu().numpy().astype(np.float32)
 
         # Run k-means clustering on loss trajectories
         kmeans = faiss.Kmeans(d=x.shape[1], k=num_cluster, niter=20, verbose=False)
@@ -149,5 +185,5 @@ class S2LUpsample(Schedule):
         plt.xticks(np.arange(0, max_val + 1, 1))  # Set x-axis ticks at integer values
         plt.tight_layout()
 
-        plt.savefig(os.path.join(save_dir, f"{self.alpha}__{self.beta}__{self.min_w}__{self.max_unique}.png"))
+        plt.savefig(os.path.join(save_dir, f"{self.upsample_amount}__{self.num_cluster}.png"))
         plt.close()

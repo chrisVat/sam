@@ -175,7 +175,8 @@ class Schedule:
     
     def train(self):
         data_module = self.get_updated_train_data()       
-        
+        print(data_module["train_dataset"])
+
         # sanity-check
         if not is_running_distributed() or torch.distributed.get_rank() == 0:
             for sanity_sample in data_module["train_dataset"]:
