@@ -15,7 +15,7 @@ from utils import is_running_distributed
 # CUDA_VISIBLE_DEVICES=3 torchrun --nproc_per_node=1 --master_port=29514 train.py --config_file configs/a4_debug-run-s2lupsample.yml --wandb_key $WANDB_KEY > s2lup_3.txt
 
 
-ESTABLISH_KILLSWITCH = True
+ESTABLISH_KILLSWITCH = False
 if ESTABLISH_KILLSWITCH:
     from killswitch import setup_killswitch
     setup_killswitch()

@@ -15,7 +15,10 @@ np_cache_analysis*/
 outputs_double/*
 outputs_single/*
 res/*
-schedules/*
 usage_hist/*
 usage_hist_testing/*
 wandb/*
+
+np_cache_analysis*
+*.png
+.npy

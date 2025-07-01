@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 from torch.utils.data import Sampler, DataLoader
 
-VAL = True
+VAL = False
 
 
 class LengthSortedBatchSampler(Sampler):
@@ -228,7 +228,7 @@ if __name__ == '__main__':
     #args.config_file = './configs/default-900-train-mathinstruct-sg-mini.yml'
     #args.config_file = './configs/preconfsam_10-singlegpu-mini.yml'
 
-    args.config_file = './configs/small_proxy.yml'
+    args.config_file = './configs/small-proxy.yml'
     #args.config_file = './configs/s2l-preconfsam_05-singlegpu_2e-5.yml'
 
     #args.ckpt = 5000
@@ -238,8 +238,8 @@ if __name__ == '__main__':
     #main(model_path=args.model_path, config_file=args.config_file, ckpt=args.ckpt)
     #exit()
 
-    inc = 2000
-    start_ckpt = 1000
+    inc = 500
+    start_ckpt = 500
     while start_ckpt <= 25000:
         args.ckpt = start_ckpt
         main(model_path=args.model_path, config_file=args.config_file, ckpt=args.ckpt)
