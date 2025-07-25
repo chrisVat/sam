@@ -249,7 +249,8 @@ if is_apex_available():
 
 TRAINER_STATE_NAME = "trainer_state.json"
 logger = logging.get_logger(__name__)
-
+DEBUG_PRINT = False
+VALIDATE_CODE = False
 
 
 
@@ -270,27 +271,35 @@ torch.set_float32_matmul_precision('high')
 
 
 from collections import Counter
+from torch.utils.data import Sampler
 
 
-class OversampleWrapper(Dataset):
-    def __init__(self, base_dataset, usage_counts, verbose=False):
-        self.dataset = base_dataset
-        self.indices = [i for i, count in enumerate(usage_counts) for _ in range(count)]
-        
-        # Optional: print sample usage distribution
-        counts = Counter(self.indices)
-        if verbose:
-            print("[OversampleWrapper] Sample usage counts:")
-            for i in sorted(counts):
-                print(f"  Index {i}: {counts[i]}x")
+class FixedCountSampler(Sampler[int]):
+    def __init__(self, usage_counts, shuffle=True, seed=42):
+        if not isinstance(usage_counts, (list, tuple)):
+            usage_counts = list(usage_counts)
+        self._expanded = [i for i, c in enumerate(usage_counts) for _ in range(int(c))]
+        self.shuffle = shuffle
+        self.seed = int(seed)
+        self.epoch = 0
+        self._length = len(self._expanded)
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        if self.shuffle:
+            g = torch.Generator()
+            g.manual_seed(self.seed + self.epoch)
+            perm = torch.randperm(self._length, generator=g).tolist()
+            for j in perm:
+                yield self._expanded[j]
+        else:
+            # fixed order
+            yield from self._expanded
 
     def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        return self.dataset[self.indices[idx]]
-
-
+        return self._length
 
 
 class CustomTrainer(Trainer):
@@ -331,6 +340,8 @@ class CustomTrainer(Trainer):
 
         Subclass and override for custom behavior.
         """
+        cur_labels = inputs.get("labels", None)
+        
         if (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
             labels = inputs.pop("labels")
         else:
@@ -389,7 +400,11 @@ class CustomTrainer(Trainer):
         # if rank is 0
         #if dist.get_rank() == 0:
 
-        print(f"gpu: ", dist.get_rank(), "id: ", inputs["id"], "loss: ", loss.item(), "num_items_in_batch: ", num_items_in_batch)
+        if DEBUG_PRINT:
+            print(f"gpu: ", dist.get_rank(), "shuffled id: ", inputs["id"], "og_id: ", inputs["original_idx"], "loss: ", loss.item(), "num_items_in_batch: ", num_items_in_batch, "labels: ", cur_labels)
+        else:
+            print(f"gpu: ", dist.get_rank(), "shuffled id: ", inputs["id"], "og_id: ", inputs["original_idx"], "loss: ", loss.item(), "num_items_in_batch: ", num_items_in_batch)
+        
         #print("OUTPUT_PRINT gpu: ", dist.get_rank(), "id: ", cur_id, "loss: ", loss / dist.get_world_size(), "num_items_in_batch: ", num_items_in_batch)
 
         """
@@ -589,9 +604,69 @@ class CustomTrainer(Trainer):
             return loss.detach()
 
 
+    def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None):
+        """
+        Setup the scheduler. The optimizer of the trainer must have been set up either before this method is called or
+        passed as an argument.
+
+        Args:
+            num_training_steps (int): The number of training steps to do.
+        """
+        print("Creating scheduler with num_training_steps: ", num_training_steps)
+        print("Scheduler Num warmup steps: ", self.args.get_warmup_steps(num_training_steps))
+        print("is lr_scheduler none: ", self.lr_scheduler is None)
+        print("scheudler specific kwargs: ", self.args.lr_scheduler_kwargs)
+        print("scheduler type: ", self.args.lr_scheduler_type)
+        print("optimizer lr: ", self.optimizer.param_groups[0]["lr"] if self.optimizer else "None")        
+        
+        if self.lr_scheduler is None:
+            # create cosine annealing scheduler
+            print("this ran")           
+            
+            self.lr_scheduler = get_scheduler(
+                self.args.lr_scheduler_type,
+                optimizer=self.optimizer if optimizer is None else optimizer,
+                num_warmup_steps=self.args.get_warmup_steps(num_training_steps), 
+                num_training_steps=num_training_steps,
+                scheduler_specific_kwargs=self.args.lr_scheduler_kwargs,
+            )
+            self._created_lr_scheduler = True
+
+        print("Created scheduler: ", self.lr_scheduler)
+
+
+        return self.lr_scheduler
+
+
+    def _evaluate(self, trial, ignore_keys_for_eval, skip_scheduler=False):
+        metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
+        self._report_to_hp_search(trial, self.state.global_step, metrics)
+
+        # Run delayed LR scheduler now that metrics are populated
+        if isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau) and not skip_scheduler:
+            metric_to_check = self.args.metric_for_best_model
+            if not metric_to_check.startswith("eval_"):
+                metric_to_check = f"eval_{metric_to_check}"
+            try:
+                self.lr_scheduler.step(metrics[metric_to_check])
+            except KeyError as exc:
+                raise KeyError(
+                    f"The `metric_for_best_model` training argument is set to '{metric_to_check}', "
+                    f"which is not found in the evaluation metrics. "
+                    f"The available evaluation metrics are: {list(metrics.keys())}. "
+                    f"Please ensure that the `compute_metrics` function returns a dictionary that includes '{metric_to_check}' or "
+                    f"consider changing the `metric_for_best_model` via the TrainingArguments."
+                ) from exc
+        return metrics
+
+
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
     ):
+
+        if DEBUG_PRINT:
+            torch.set_printoptions(threshold=float('inf'), linewidth=2000)
+
         self.accelerator.free_memory()
         self._train_batch_size = batch_size
         if self.args.auto_find_batch_size:
@@ -611,6 +686,15 @@ class CustomTrainer(Trainer):
             self.state.train_batch_size = self._train_batch_size
         logger.debug(f"Currently training with a batch size of: {self._train_batch_size}")
         # Data loader and number of training steps
+        
+        if VALIDATE_CODE:
+            og_dataset = self.train_dataset
+            og_ids = []
+            dataset_ids = []
+            for i in range(len(og_dataset)):
+                og_ids.append(og_dataset[i]["original_idx"].item())
+                dataset_ids.append(og_dataset[i]["id"].item())
+
         train_dataloader = self.get_train_dataloader()
         if self.is_fsdp_xla_v2_enabled:
             train_dataloader = tpu_spmd_dataloader(train_dataloader)
@@ -619,6 +703,8 @@ class CustomTrainer(Trainer):
         # number of training epochs: num_train_epochs
         # number of training steps per epoch: num_update_steps_per_epoch
         # total number of training steps to execute: max_steps
+        
+        print("2 train dataloader length: ", len(train_dataloader))
         total_train_batch_size = self._train_batch_size * args.gradient_accumulation_steps * args.world_size
         (
             num_train_epochs,
@@ -629,6 +715,18 @@ class CustomTrainer(Trainer):
             len_dataloader,
             max_steps,
         ) = self.set_initial_training_values(args, train_dataloader, total_train_batch_size)
+
+        print("num_train_epochs: ", num_train_epochs)
+        print("num_update_steps_per_epoch: ", num_update_steps_per_epoch)
+        print("num_examples: ", num_examples)
+        print("num_train_samples: ", num_train_samples)
+        print("epoch_based: ", epoch_based)
+        print("len_dataloader: ", len_dataloader)
+        print("max_steps: ", max_steps)
+
+
+        self.seen_ids = []
+        self.seen_ids_og = []
 
         num_train_tokens = None
         if self.args.include_tokens_per_second:
@@ -696,6 +794,10 @@ class CustomTrainer(Trainer):
                 # configure fsdp plugin for qlora if any
                 self._fsdp_qlora_plugin_updates()
                 if self.accelerator.mixed_precision != "fp8":
+                    print("getting all modules in self.model")
+                    for module in self.model.modules():
+                        print("module: ", module)
+
                     self.model = self.accelerator.prepare(self.model)
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
 
@@ -798,8 +900,11 @@ class CustomTrainer(Trainer):
         grad_norm: Optional[float] = None
         self.control = self.callback_handler.on_train_begin(args, self.state, self.control)
 
+        #args.eval_on_start = True
+
         if args.eval_on_start:
             self._evaluate(trial, ignore_keys_for_eval, skip_scheduler=True)
+            #exit()
 
 
         for epoch in range(epochs_trained, num_train_epochs):
@@ -816,6 +921,10 @@ class CustomTrainer(Trainer):
                 if len_dataloader is not None
                 else args.max_steps * args.gradient_accumulation_steps
             )
+            print("steps in epoch: ", steps_in_epoch)
+            print("len dataloader: ", len_dataloader)
+            #exit()
+
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
             if epoch == epochs_trained and resume_from_checkpoint is not None and steps_trained_in_current_epoch == 0:
@@ -863,6 +972,12 @@ class CustomTrainer(Trainer):
                     num_items_in_batch = num_items_in_batch[0].item()
                 #print("num_items_in_batch: ", num_items_in_batch)
                 #print(f"global step: {self.state.global_step}, num batches: f{len(batch_samples)}, gpu: {dist.get_rank()}")
+
+                #if update_step < 1940:
+                #    self.state.global_step += 1
+                #    step += 1
+                #    continue
+
 
                 for i, inputs in enumerate(batch_samples):
                     step += 1
@@ -913,6 +1028,19 @@ class CustomTrainer(Trainer):
                         and self.accelerator.distributed_type != DistributedType.DEEPSPEED
                         else contextlib.nullcontext
                     )
+
+                    #print("inputs: ", inputs)
+                    # jump here jump here
+                    if VALIDATE_CODE:
+                        self.seen_ids.extend(inputs["id"])
+                        self.seen_ids_og.extend(inputs["original_idx"])
+
+                        #print(f"gpu: ", dist.get_rank(), "shuffled id: ", inputs["id"], "og_id: ", inputs["original_idx"], "loss: ", 0.0, "num_items_in_batch: ", 0, "labels: ", inputs["labels"])
+                        continue
+
+                    #print(f"gpu: ", dist.get_rank(), "shuffled id: ", inputs["id"], "og_id: ", inputs["original_idx"], "loss: ", 0.0, "num_items_in_batch: ", 0, "labels: ", inputs["labels"])
+                    #continue
+
                     with context():
                         tr_loss_step = self.training_step_pass1(model, inputs, num_items_in_batch)
 
@@ -1013,6 +1141,69 @@ class CustomTrainer(Trainer):
                     if is_torch_xla_available():
                         xm.mark_step()
                     break
+            
+            # print the memory of the train loader
+            # access memory from accelerator wrapped OversampleWrapper
+
+            # Seen ids:  [tensor(0, device='cuda:0'), tensor(0, device='cuda:0'), tensor(0, device='cuda:0'), t
+            # convert from tensor to list of ints
+            if VALIDATE_CODE:
+                self.seen_ids = [int(x.item()) for x in self.seen_ids]
+                self.seen_ids_og = [int(x.item()) for x in self.seen_ids_og]
+
+                # ensure the same id lines up with seen_ids_og
+                id_mapping = {}
+                og_counts = {}
+                for i, og_id in enumerate(self.seen_ids_og):
+                    if og_id not in id_mapping:
+                        id_mapping[og_id] = []
+                    id_mapping[og_id].append(self.seen_ids[i])
+
+                print("id mappings: ")
+                id_keys = sorted(id_mapping.keys())
+                for k in id_keys:
+                    print(f"  {k}: {id_mapping[k]}")
+
+                for og_id in self.seen_ids_og:
+                    og_counts[og_id] = og_counts.get(og_id, 0) + 1
+
+                print("og counts: ")
+                og_count_keys = sorted(og_counts.keys())
+                for k in og_count_keys:
+                    print(f"  {k}: {og_counts[k]}")
+
+                # get number of unique seen_ids
+                num_unique_seen_ids = len(set(self.seen_ids))
+                recreated_oversampling = np.zeros(num_unique_seen_ids, dtype=int)
+                
+                for seen_id in self.seen_ids:
+                    recreated_oversampling[seen_id] += 1
+                
+                # compare to self.per_example_usages
+                if hasattr(self, "per_example_usages"):
+                    if len(self.per_example_usages) != len(recreated_oversampling):
+                        raise ValueError(
+                            f"per_example_usages len {len(self.per_example_usages)} != "
+                            f"recreated_oversampling len {len(recreated_oversampling)}"
+                        )
+                    if not np.array_equal(self.per_example_usages, recreated_oversampling):
+                        raise ValueError(
+                            f"per_example_usages {self.per_example_usages} != "
+                            f"recreated_oversampling {recreated_oversampling}"
+                        )
+                    print("Recreated oversampling matches per_example_usages perfectly!")
+
+                print("Seen ids: ", self.seen_ids)
+                print("Seen ids og: ", self.seen_ids_og)
+
+                # compare seen ids to the og ids in the dataset            
+                for og_id in og_ids:
+                    if og_id not in self.seen_ids_og:
+                        logger.warning(f"Original id {og_id} not seen in this epoch!")
+                        print(f"Original id {og_id} not seen in this epoch!")
+                print("og ids: ", og_ids)
+                exit()
+            
             if step < 0:
                 logger.warning(
                     "There seems not to be a single sample in your epoch_iterator, stopping training at step"
@@ -1109,6 +1300,18 @@ class CustomTrainer(Trainer):
             self._generator.manual_seed(42)
         generator = self._generator
 
+        per_usage = getattr(self, "per_example_usages", None) 
+        if per_usage is not None:
+            if len(per_usage) != len(self.train_dataset):
+                raise ValueError(
+                    f"per_example_usages len {len(per_usage)} != "
+                    f"train_dataset len {len(self.train_dataset)}"
+                )
+            if self.args.group_by_length:
+                print("WARNING: group_by_length ignored because per_example_usages is set.")
+            print("Using FixedCountSampler for oversampling (deterministic).")
+            return FixedCountSampler(per_usage)
+
 
         # Build the sampler.
         if self.args.group_by_length:
@@ -1140,19 +1343,15 @@ class CustomTrainer(Trainer):
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
 
-        train_dataset = self.train_dataset
+        self.train_dataset = self.train_dataset
 
-        # === OVERSAMPLING HOOK ===
-        if self.per_example_usages is not None:
-            print("[Trainer] Oversampling with per_example_usages...")
-            train_dataset = OversampleWrapper(train_dataset, self.per_example_usages)
-            #print(f"[Trainer] Sample counts: {self.per_example_usages[self.train_dataset.indices]}")
-        else:
-            print("[Trainer] No oversampling applied.")
+        #print("get_train_dataloader 1: Train dataset length: ", len(self.train_dataset))
+        #exit()
 
         data_collator = self.data_collator
-        if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
-            train_dataset = self._remove_unused_columns(train_dataset, description="training")
+        if is_datasets_available() and isinstance(self.train_dataset, datasets.Dataset):
+            pass
+            # self.train_dataset = self._remove_unused_columns(self.train_dataset, description="training")
         else:
             data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
 
@@ -1164,13 +1363,93 @@ class CustomTrainer(Trainer):
             "persistent_workers": self.args.dataloader_persistent_workers,
         }
 
-        if not isinstance(train_dataset, torch.utils.data.IterableDataset):
+        if not isinstance(self.train_dataset, torch.utils.data.IterableDataset):
             dataloader_params["sampler"] = self._get_train_sampler()
             dataloader_params["drop_last"] = self.args.dataloader_drop_last
             dataloader_params["worker_init_fn"] = seed_worker
             dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
 
-        return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
+        #print("get_train_dataloader 2: Train dataset length: ", len(self.train_dataset)) # 598
+        new_val =  self.accelerator.prepare(DataLoader(self.train_dataset, **dataloader_params))
+        #print("get train_dataloader 3: Train dataset length: ", len(new_val)) 
+        print("Batch size:", self._train_batch_size)
+        print("Num GPUs (Accelerator):", self.accelerator.num_processes)
+        print("Drop last:", self.args.dataloader_drop_last)
+        #new_val.base_dataloader.dataset._debug()
+        #exit()
+
+        return new_val
+
+
+    def evaluate(
+        self,
+        eval_dataset: Optional[Union[Dataset, Dict[str, Dataset]]] = None,
+        ignore_keys: Optional[List[str]] = None,
+        metric_key_prefix: str = "eval",
+    ) -> Dict[str, float]:
+        # handle multipe eval datasets
+        print("Beginning Evaluation...")
+        override = eval_dataset is not None
+        eval_dataset = eval_dataset if override else self.eval_dataset
+        if isinstance(eval_dataset, dict):
+            metrics = {}
+            for eval_dataset_name, _eval_dataset in eval_dataset.items():
+                dataset_metrics = self.evaluate(
+                    eval_dataset=_eval_dataset if override else eval_dataset_name,
+                    ignore_keys=ignore_keys,
+                    metric_key_prefix=f"{metric_key_prefix}_{eval_dataset_name}",
+                )
+                metrics.update(dataset_metrics)
+            return metrics
+
+        # memory metrics - must set up as early as possible
+        self._memory_tracker.start()
+
+        eval_dataloader = self.get_eval_dataloader(eval_dataset)
+        if self.is_fsdp_xla_v2_enabled:
+            eval_dataloader = tpu_spmd_dataloader(eval_dataloader)
+
+        start_time = time.time()
+
+        eval_loop = self.prediction_loop if self.args.use_legacy_prediction_loop else self.evaluation_loop
+        output = eval_loop(
+            eval_dataloader,
+            description="Evaluation",
+            # No point gathering the predictions if there are no metrics, otherwise we defer to
+            # self.args.prediction_loss_only
+            prediction_loss_only=True if self.compute_metrics is None else None,
+            ignore_keys=ignore_keys,
+            metric_key_prefix=metric_key_prefix,
+        )
+
+        total_batch_size = self.args.eval_batch_size * self.args.world_size
+        if f"{metric_key_prefix}_jit_compilation_time" in output.metrics:
+            start_time += output.metrics[f"{metric_key_prefix}_jit_compilation_time"]
+        if f"{metric_key_prefix}_model_preparation_time" in output.metrics:
+            start_time += output.metrics[f"{metric_key_prefix}_model_preparation_time"]
+        output.metrics.update(
+            speed_metrics(
+                metric_key_prefix,
+                start_time,
+                num_samples=output.num_samples,
+                num_steps=math.ceil(output.num_samples / total_batch_size),
+            )
+        )
+
+        self.log(output.metrics)
+
+        if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
+            # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
+            xm.master_print(met.metrics_report())
+
+        self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, output.metrics)
+
+        self._memory_tracker.stop_and_update_metrics(output.metrics)
+
+        print("Completed Evaluation...")
+
+        return output.metrics
+
 
     def evaluation_loop(
         self,
@@ -1257,7 +1536,7 @@ class CustomTrainer(Trainer):
 
         # Main evaluation loop
         for step, inputs in enumerate(dataloader):
-            # Update the observed num examples
+            # Update the observed num examples            
             observed_batch_size = find_batch_size(inputs)
             if observed_batch_size is not None:
                 observed_num_examples += observed_batch_size

@@ -3,6 +3,7 @@ sys.path.insert(0, os.path.abspath('.'))
 from schedule_base import Schedule
 from tqdm import tqdm
 import faiss
+from utils import make_supervised_data_module
 import matplotlib.pyplot as plt
 
 VISUALIZE_TRAJECTORIES = True
@@ -13,19 +14,19 @@ class S2LUpsample(Schedule):
 
         self.upsample_amount = args.get("upsample_amount", 3) # increase in example usage 
         self.num_cluster = args.get("num_cluster", 2) # of clusters per source, highest value loss is upsampled per source
-
         self.sources = np.array([d["source"] for d in self.train_data])
+        self.max_checkpoints = args.get("max_checkpoints", 3)  # max number of checkpoints to load losses from
 
         if torch.distributed.get_rank() != 0:
             return
 
         losses = []
 
-        max_checkpoints = 100
+        max_checkpoints = self.max_checkpoints
 
         all_checkpoints = glob.glob(f'{args["ref_model_path"]}/*')
         # sort on number in checkpoint-"number"
-        all_checkpoints.sort(key=lambda x: int(os.path.basename(x).split('-')[1])) 
+        all_checkpoints.sort(key=lambda x: int(os.path.basename(x).split('-')[-1])) 
 
         for ck in tqdm(all_checkpoints):
             print("Loading losses from checkpoint:", ck)
@@ -37,14 +38,17 @@ class S2LUpsample(Schedule):
                 print(f"Reached max checkpoints ({max_checkpoints}), stopping loading.")
                 break
         
-        print("self.losses:", len(losses), "losses loaded from checkpoints")        
+        #print("self.losses:", len(losses), "losses loaded from checkpoints")        
         if not losses:
             self.losses = torch.zeros(self.n_pool, 1)
         else:
             self.losses = torch.stack(losses, 1).float()
             self.losses[torch.isnan(self.losses)] = 0
 
+        print("losses shape:", self.losses.shape)
+        #print("train index:", self.train_idx)
         self.losses   = self.losses[self.train_idx]
+        #print("self.losses shape after indexing:", self.losses.shape)
         self.loss_vec = self.losses.mean(1)
         # set labeled idx to 1
         self.labeled_idx = torch.zeros(self.n_pool, dtype=bool)  
@@ -62,9 +66,10 @@ class S2LUpsample(Schedule):
         average_example_per_source = self.n_pool / len(sorted_source_idx)
 
         sampled = []
+        self.labeled_idx[:] = True
 
         # how many times each example is shown
-        per_example_usages = np.zeros(self.n_pool, dtype=int)
+        per_example_usages = np.ones(self.n_pool, dtype=int)
 
         for i in range(len(sorted_source_idx)):
             print("source", i, "of", len(sorted_source_idx), ":", sources[sorted_source_idx[i]], counts[sorted_source_idx[i]])
@@ -75,7 +80,7 @@ class S2LUpsample(Schedule):
             per_example_usages[indices] = 1 
             self.labeled_idx[indices] = True
 
-            if num_source_examples < average_example_per_source:
+            if num_source_examples < average_example_per_source or num_source_examples < 78:
                 # upsample all per_example_usages to upsample_amount + 1
                 # get all indices of the source examples, and set the per example usage of those indices to num_source_examples + 1
                 per_example_usages[indices] = int(self.upsample_amount + 1)
@@ -99,7 +104,7 @@ class S2LUpsample(Schedule):
                         else:
                             plt.plot(self.losses[indices[j]], color='blue', alpha=0.5, label='Unselected' if j == 0 else "")
                     plt.legend()
-                    plt.savefig(f"upsampled_trajectories/loss_trajectories_source{sorted_source_idx[i]}.png")
+                    plt.savefig(f"upsampled_trajectories/loss_trajectories_source{sorted_source_idx[i]}_{self.max_checkpoints}.png")
 
 
         self.per_example_usages = per_example_usages
@@ -118,7 +123,7 @@ class S2LUpsample(Schedule):
         x = losses.detach().cpu().numpy().astype(np.float32)
 
         # Run k-means clustering on loss trajectories
-        kmeans = faiss.Kmeans(d=x.shape[1], k=num_cluster, niter=20, verbose=False)
+        kmeans = faiss.Kmeans(d=x.shape[1], k=num_cluster, niter=20, verbose=True)
         kmeans.train(x)
         _, cluster_ids = kmeans.index.search(x, 1)
         cluster_ids = cluster_ids.squeeze()  

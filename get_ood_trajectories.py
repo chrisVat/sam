@@ -12,9 +12,6 @@ import torch.nn.functional as F
 
 from torch.utils.data import Sampler, DataLoader
 
-from transformers import TrainingArguments
-from consts import LLAMA_IGNORE_INDEX
-
 VAL = True
 
 
@@ -37,8 +34,8 @@ def loss(data, model, batch_size=32):
     model.cuda()
     model.eval()
 
-    losses = {}
-    token_counts = {}
+    losses = []
+    token_counts = []
     collator = data["data_collator"]
     source = "train_dataset"
     ignore_index = -100
@@ -61,7 +58,6 @@ def loss(data, model, batch_size=32):
         for batch_idx, batch in progress:
             input_ids = batch["input_ids"].cuda()
             labels = batch["labels"].cuda()
-            example_ids = batch["id"]
 
             outputs = model(input_ids=input_ids, labels=labels, return_dict=True)
             logits = outputs.logits
@@ -88,29 +84,27 @@ def loss(data, model, batch_size=32):
             example_token_counts = valid_mask.sum(dim=1)
 
             per_example_losses = example_loss_sums / example_token_counts.clamp(min=1)
+            for loss_val, count in zip(per_example_losses, example_token_counts):
+                losses.append(loss_val.detach().cpu())
+                token_counts.append(count.item())
 
-            for example_id, loss_val, count in zip(example_ids, per_example_losses, example_token_counts):
-                losses[example_id] = loss_val.detach().cpu()
-                token_counts[example_id] = count.item()
-
-    # Return sorted lists (by example_id)
-    ordered_keys = sorted(losses.keys())
-    losses = [losses[k] for k in ordered_keys]
-    token_counts = [token_counts[k] for k in ordered_keys]
     return losses, token_counts
 
+def main(model_path, config_file=None, ckpt=-1, dataset_name=None):
+    path_friendly = dataset_name.replace("/", "__") if dataset_name else "default_dataset"
+    loss_file_name = f"{path_friendly}_losses.pt" if not VAL else f"{path_friendly}_val_losses.pt"
 
-def main(model_path, config_file=None, ckpt=-1):
-    loss_file_name = "losses.pt" if not VAL else "val_losses.pt"
-    
     if config_file:
         # Local model path logic
         with open(config_file, 'r') as f:
             args = yaml.full_load(f)
+        
+        args["full_data_path"] = dataset_name if dataset_name else args.get("full_data_path", None)
+        
         rank0_print('Configuration loaded!')
         rank0_print(yaml.dump(args, sort_keys=False, default_flow_style=False))
 
-        args["data_path_root"] = f"res/{args['result_dir_name']}/data"
+        args["data_path_root"] = f"res/data"
         args["output_dir_root"] = f"res/{args['result_dir_name']}/output"
         
         if ckpt == -1:
@@ -125,7 +119,9 @@ def main(model_path, config_file=None, ckpt=-1):
             "cache_dir": None,
             #"model_max_length": 2048,  # You might want to make this configurable
             "model_max_length": 900,  # You might want to make this configurable
-            "model_name_or_path": model_path
+            "model_name_or_path": model_path,
+            "full_data_path": dataset_name if dataset_name else None,
+            "data_path_root": "res/data",
         }
         if ckpt != -1:
             model_path = f"{model_path}@{ckpt}"
@@ -150,7 +146,6 @@ def main(model_path, config_file=None, ckpt=-1):
 
     rank0_print(f"***======================================================================================================")
     rank0_print(f"***** Checkpoint {ckpt} ======================================================================================================")
-    
     if args.get("use_lora", False):
         rank0_print(f"***** Using LoRA for model {model_path}!")
         model, tokenizer = load_lora_model(adapter_dir=model_path, cache_dir=args["cache_dir"])
@@ -164,24 +159,17 @@ def main(model_path, config_file=None, ckpt=-1):
                                                             model=model)  # fix tokenizer's special_token_maps
     rank0_print(f'***** smart_tokenizer_and_embedding_resize done!')
     
+    print("data path: ", args.get("full_data_path", None))
+    #exit()
     
-    all_data = make_supervised_data_module(tokenizer=tokenizer, data_path=args["full_data_path"], eval=VAL)
-    # get all data attributes
-    # label smoothing factor
-    #label_smoothing_factor = args.get("label_smoothing_factor", None)
-    #print(f"***** Label smoothing factor: {label_smoothing_factor:.2f}")
-        
-    #train_args = args["train_args"]
-    #train_args = TrainingArguments(**train_args)
-    #label_smoothing_factor = train_args.label_smoothing_factor
-    #smoother = LabelSmoother(epsilon=label_smoothing_factor, ignore_index=LLAMA_IGNORE_INDEX)
-
-    #print("Train args:", train_args)
-    #print("Label smoothing factor:", label_smoothing_factor)
+    all_data = make_supervised_data_module(tokenizer=tokenizer, data_path=args["full_data_path"])
+    print(f"***** Data loaded from {args['full_data_path']}!")
+    #exit()
 
     #exit()
 
-    losses, token_counts = loss(data=all_data, model=model) #, label_smoother=smoother)
+
+    losses, token_counts = loss(data=all_data, model=model)
 
     # load file (it exists)
     #old_mean_entropies_all = torch.load(loss_file)
@@ -196,28 +184,8 @@ def main(model_path, config_file=None, ckpt=-1):
     torch.save(losses, loss_file)
     torch.save(token_counts, loss_file.replace(".pt", "_token_counts.pt"))
     print(f"***** Losses saved to {loss_file}")      
-      
-
-def run_first_n_losses(data, model, n):
-    """compute last hidden states for a data_module"""
-    model.cuda()
-    model.eval()
-    
-    losses = []
-    
-    source = "train_dataset" if not VAL else "eval_dataset"
-    with torch.no_grad():
-        for _,datapoint in enumerate(data[source]):
-            input_ids = datapoint["input_ids"].unsqueeze(0).cuda()
-            labels = datapoint["labels"].unsqueeze(0).cuda()
-            result = model(input_ids=input_ids, labels=labels, return_dict=True)
-            loss = result.loss
-            print(f"Example {len(losses)}: Loss = {loss.item():.6f}")
-            losses.append(loss.detach().cpu())
-            if len(losses) >= n:
-                break
+    print("mean entropies: ", losses[:10])  # print first 10 losses
     return losses
-
 
 
 if __name__ == '__main__':
@@ -234,44 +202,71 @@ if __name__ == '__main__':
     #args.config_file = './configs/default-900-train-mathinstruct-sg-mini.yml'
     #args.config_file = './configs/preconfsam_10-singlegpu-mini.yml'
 
-    #args.config_file = './configs/small-proxy-full.yml'
+    args.config_file = './configs/small-proxy.yml'
     #args.config_file = './configs/s2l-preconfsam_05-singlegpu_2e-5.yml'
-    #args.config_file = './configs/s2l_relative_upsample_15_full.yml'
 
     #args.ckpt = 5000
-    
-    args.ckpt = 20000
+    args.ckpt = 12000
     args.model_path = None 
 
     #main(model_path=args.model_path, config_file=args.config_file, ckpt=args.ckpt)
     #exit()
 
-    #'s2l_relative_upsample_15_full-phi2-lora.yml',
-    #'phi2-full-lora.yml'
-
-    #args.config_file = './configs/phi2-full-lora.yml'
-    #args.ckpt = 5835
-    #args.ckpt = 1500
-
-    args.config_file = './configs/s2l_relative_upsample_15_full-phi2-lora.yml'
-    #args.ckpt = 8214
-    #args.ckpt = 1500
-
-    args.config_file = './configs/s2l_relative_upsample_6_full-phi2-lora.yml'
-    args.ckpt = 8205
-    #args.ckpt = 1500
-
-    #args.ckpt = 2000
-    #args.ckpt = 1500
-    #args.ckpt = 1000
-    #args.ckpt = 500
     inc = 500
-    start_ckpt = args.ckpt
-    while start_ckpt <= 8500:
-        args.ckpt = start_ckpt
-        main(model_path=args.model_path, config_file=args.config_file, ckpt=args.ckpt)
-        start_ckpt += inc
-        #break
+    start_ckpt = 44000
+    
+    start_ckpt = 36500
+    
+    #start_ckpt = 2500
+
+    # include rSVAMP, Mathematics, SimulEq
+    datasets = [
+        ("ChilleD/SVAMP",            None),
+        ("deepmind/math_dataset",    None),
+        ("simuleq",             None),
+        ("gsm8k", "main"),       # or "hard"
+        ("EleutherAI/hendrycks_math", None),          # Hendrycks et al. MATH
+        ("numglue", None),       # Mishra et al.
+        ("TIGER-Lab/MathInstruct", None),  # MathInstruct dataset
+    ]
+
+    #datasets = [
+    #    ("TiGER-Lab/MathInstruct", None),  # MathInstruct dataset
+    #]
+
+    config_files = [
+        #"./configs/small-proxy-full.yml",
+        #"./configs/s2l_relative_upsample_15_full.yml",
+        
+        #'./configs/phi2-full-lora.yml',
+        #'./configs/s2l_relative_upsample_15_full-phi2-lora.yml',
+        './configs/s2l_relative_upsample_6_full-phi2-lora.yml',
+    ]
+
+    ckpt_nums = [
+        #5835, 
+        #8214, 
+        #8205,
+        8000
+    ]
+
+
+
+
+    for config_idx, config_file in enumerate(config_files):
+        if len(ckpt_nums) > 0:
+            args.ckpt = ckpt_nums[config_idx]
+        else:
+            args.ckpt = start_ckpt
+        args.config_file = config_file
+        for dataset_name in datasets:
+            cur_name = dataset_name[0] if dataset_name[1] is None else f"{dataset_name[0]}:{dataset_name[1]}"
+            print(cur_name)
+            args.full_data_path = dataset_name
+            losses = main(model_path=args.model_path, config_file=args.config_file, ckpt=args.ckpt, dataset_name=cur_name)
+            if losses is not None:
+                average_loss = np.mean([l.item() for l in losses])
+                print(f"***** Average loss for {cur_name} at ckpt {args.ckpt}: {average_loss:.6f}")
 
     #main(model_path=args.model_path, config_file=args.config_file, ckpt=args.ckpt)
 

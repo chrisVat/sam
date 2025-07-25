@@ -19,12 +19,14 @@ class Full(Schedule):
             args,
         )
 
+
     def initialize_labeled_data(self):
-        """initialize labeled data as full data"""
+        # initialize labeled data as full data
         if not is_running_distributed() or torch.distributed.get_rank() == 0:
             self.labeled_idx[:] = True
 
     def get_updated_train_data(self):
-        """load & make round labeled data -> training data"""
-        data_module = make_supervised_data_module(tokenizer=self.tokenizer, data_path=self.full_data_path)
+        # load & make round labeled data -> training data
+        print("full getting updated train data")
+        data_module = make_supervised_data_module(tokenizer=self.tokenizer, data_path=self.full_data_path, verbose=True)
         return data_module

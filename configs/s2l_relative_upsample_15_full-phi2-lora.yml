@@ -1,0 +1,47 @@
+full_data_path: TIGER-Lab/MathInstruct
+model_name_or_path: microsoft/phi-2 # microsoft/Phi-3-mini-4k-instruct  # path to pretrained foundation llm
+cache_dir: /data/huggingface_models
+model_max_length: 512
+
+ref_model_path: res/proxy-full-train-long/output/
+
+upsample_amount: 1
+num_cluster: 2
+max_checkpoints: 15
+
+schedule_name: S2LRelativeUpsample
+#result_dir_name: default-mathinstruct_phi-2_3epochs_900-1gpu_lr2e-5_bs32_proper_backup
+result_dir_name: phi2-s2lrelup-u1-c2-cp15-full-lora
+sam_mode: "no"
+sam_rho: 0.
+sam_adaptive: false
+
+use_lora: true
+
+train_args:
+  optim: adamw_torch
+  num_train_epochs: 3
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 4
+  eval_strategy: "epoch"
+  save_strategy: "steps"
+  save_steps: 500
+  save_total_limit: 15
+  learning_rate: 2.0e-5
+  weight_decay: 0.
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  logging_steps: 1
+  fsdp: "full_shard auto_wrap" 
+  fsdp_config: 
+    transformer_layer_cls_to_wrap: "PhiDecoderLayer" # "Phi3DecoderLayer"
+  bf16: TRUE
+  tf32: TRUE
+  group_by_length: FALSE # TRUE
+  full_determinism: TRUE
+  seed: 42
+  max_grad_norm: 1.0
+
+#load_from: "phi2-s2lrelup-u1-c2-cp15-full-lora"
+#load_step: 1000

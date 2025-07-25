@@ -22,3 +22,6 @@ np_cache_analysis*
 *.png
 .npy
 upsampled_trajectories/*
+loss_curves/*
+datasets/*
+tmp/*

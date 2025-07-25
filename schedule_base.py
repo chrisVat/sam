@@ -21,6 +21,9 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
 from torch.distributed.fsdp.fully_sharded_data_parallel import MixedPrecision
 
+from transformers.models.phi.modeling_phi import PhiDecoderLayer
+from torch.utils.data import DataLoader, Dataset, IterableDataset, RandomSampler, SequentialSampler
+
 
 class Schedule:
     def __init__(self, 
@@ -42,7 +45,8 @@ class Schedule:
             if 'load_step' in args:
                 self.load_step = args.pop('load_step')
         
-        
+        print("Schedule init, full_data_path:", self.full_data_path)
+
         # load full-sized source data -> for indexing all samples
         if self.full_data_path.endswith(".jsonl"):
             with open(self.full_data_path, "r") as f:
@@ -56,29 +60,31 @@ class Schedule:
                 self.train_data = json.load(f)
         elif "MathInstruct" in self.full_data_path:
             raw_dataset = load_dataset(self.full_data_path)["train"]
-            #raw_dataset = raw_dataset.add_column("original_idx", list(range(len(raw_dataset))))
+            
+            raw_dataset = raw_dataset.add_column("original_idx", list(range(len(raw_dataset))))
+            
             dataset = raw_dataset.shuffle(seed=42)
             train_num = int(len(dataset)*0.95)
             train_data = dataset.select(range(train_num))
             val_data = dataset.select(range(train_num, len(dataset)))
 
-            #val_indices = val_data["original_idx"]
-            #val_indices_path = f"val_indices.npy"
-            #if not is_running_distributed() or torch.distributed.get_rank() == 0:
-            #    np.save(val_indices_path, val_indices)
-            #    rank0_print(f"*** val_indices saved to {val_indices_path}")
-            #exit()
-
-
-            # use keep only for train data and val data
-            #keep_only, keep_only_train = 500, 250
+            #keep_only, keep_only_train = 500, 500
             #train_data = train_data.select(range(keep_only_train))
             #val_data = val_data.select(range(keep_only))
             
             self.train_data = [train_data[i] for i in range(len(train_data))]
             self.val_data = [val_data[i] for i in range(len(val_data))]
             self.train_idx = torch.arange(len(self.train_data))
-            self.val_idx = torch.arange(len(self.val_data))
+            self.train_og_index = torch.tensor(train_data["original_idx"])
+            #print(self.train_og_index.cpu().tolist())
+
+            #exit()
+
+            self.val_og_index = torch.tensor(val_data["original_idx"])
+            self.val_idx = torch.arange(len(self.val_data)) + train_num
+
+            print("Train_og idx: ", self.train_og_index)
+            print("Val_og idx: ", self.val_og_index)
         else:
             data_df = load_dataset(self.full_data_path)["train"]  # fixed -> for indexing all samples
             # convert to json format
@@ -90,10 +96,14 @@ class Schedule:
         
         # make a supervised data module for the valiation set
         if self.val_data is not None:
-            self.val_data = make_supervised_data_module(tokenizer=self.tokenizer, data_path=self.val_data)
+            print("Creating validation data module...")
+            self.val_data = make_supervised_data_module(tokenizer=self.tokenizer, data_path=self.val_data, verbose=False)
+            self.val_data["train_dataset"].ids = self.val_idx
+            self.val_data["train_dataset"].train_og_index = self.val_og_index
             
         self.n_pool = len(self.train_data)
         # keep track of labeled/unlabeled (1/0) index
+
         self.labeled_idx = torch.zeros(self.n_pool, dtype=bool)  
         # saving options
         self.data_path_root = args["data_path_root"]
@@ -164,6 +174,7 @@ class Schedule:
     
     def get_updated_train_data(self):
         data_path = f"{self.data_path_root}/labeled.json"
+        print("Getting Train Supervised Data Module with path :", data_path)
         labeled_data_module = make_supervised_data_module(tokenizer=self.tokenizer, data_path=data_path)
         return labeled_data_module
     
@@ -174,8 +185,13 @@ class Schedule:
         return unlabeled_data_module
     
     def train(self):
+        print("schedule.train() called")
         data_module = self.get_updated_train_data()       
-        print(data_module["train_dataset"])
+        
+        #test_trainloader(data_module["train_dataset"], self.per_example_usages, self.train_og_index.cpu().tolist(), self.val_og_index.cpu().tolist())  
+        #exit()
+
+        print("Schedule base, train_og_index: ", data_module["train_dataset"].train_og_index)
 
         # sanity-check
         if not is_running_distributed() or torch.distributed.get_rank() == 0:
@@ -186,6 +202,8 @@ class Schedule:
         # get validation data
         if self.val_data is not None:
             data_module["eval_dataset"] = self.val_data["train_dataset"]
+
+        print("val_data.train_og_index: ", data_module["eval_dataset"].train_og_index)
 
         optimizer, lr_scheduler = self._create_optimizer_and_scheduler(
             data_module["train_dataset"]
@@ -265,7 +283,7 @@ class Schedule:
                 auto_wrap_policy=auto_wrap_policy,
                 mixed_precision=MixedPrecision(param_dtype=torch.bfloat16),  # optional
             )
-            """
+            #"""
 
         # add per_examples_usages to training_args
         #training_args["per_example_usages"] = self.per_example_usages if hasattr(self, 'per_example_usages') else None
@@ -359,11 +377,155 @@ class Schedule:
             optimizer = base_optimizer_fn(self.model.parameters())
 
         # Create learning rate scheduler
-        lr_scheduler = get_scheduler(
-            name=self.training_args.lr_scheduler_type,
-            optimizer=optimizer,
-            num_warmup_steps=int(self.training_args.warmup_ratio * max_train_steps),
-            num_training_steps=max_train_steps,
-        )
+        print("External, max training steps: ", max_train_steps)
+
+        #training_steps = self.training_args.num_train_epochs * len(train_dataset) // self.training_args.per_device_train_batch_size // self.training_args.gradient_accumulation_steps
+        #print(f"Getting scheduler, num training steps: {training_steps}, warmup ratio: {self.training_args.warmup_ratio}")
+
+        #lr_scheduler = get_scheduler(
+        #    name=self.training_args.lr_scheduler_type,
+        #    optimizer=optimizer,
+        #    num_warmup_steps=int(self.training_args.warmup_ratio * max_train_steps),
+        #    num_training_steps=max_train_steps,
+        #)
+        lr_scheduler = None
 
         return optimizer, lr_scheduler
+
+
+from collections import Counter
+from tqdm import tqdm
+
+class OversampleWrapper(Dataset):
+    def __init__(self, base_dataset, usage_counts, verbose=False):
+        print("creating oversample wrapper with length: ", len(base_dataset), "and usage count sum:", sum(usage_counts))
+        self.dataset = base_dataset
+        self.indices = [i for i, count in enumerate(usage_counts) for _ in range(count)]
+        print("Oversampled wrapper, indices: ", self.indices)
+
+        # Optional: print sample usage distribution
+        counts = Counter(self.indices)
+        if verbose:
+            print("[OversampleWrapper] Sample usage counts:")
+            for i in sorted(counts):
+                print(f"  Index {i}, OG Index {self.dataset[i]['original_idx']}: {counts[i]}x")
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        return self.dataset[self.indices[idx]]
+
+class DefaultLoader(Dataset):
+    def __init__(self, base_dataset, verbose=False):
+        self.dataset = base_dataset
+        if verbose:
+            print("[DefaultLoader] Initialized with dataset length:", len(self.dataset))
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        return self.dataset[idx]
+
+
+def test_trainloader(train_dataset, per_example_usages, expected_train_ogs, expected_val_ogs):
+    print("Testing train loader...")
+    print("per example usages:", per_example_usages)
+    oversample_wrapper = OversampleWrapper(train_dataset, per_example_usages, verbose=True)
+
+    seen_shuffled = []
+    seen_original = []
+
+    default_wrapper = DefaultLoader(train_dataset, verbose=True)
+    default_shuffled = []
+    default_original = []
+
+    label_map = {}
+    label_map_original ={}
+
+    def _ensure_list(val):
+        if isinstance(val, torch.Tensor):
+            if val.ndim == 0:
+                return [val.item()]
+            else:
+                return val.cpu().tolist()
+        elif isinstance(val, list):
+            return val
+        else:
+            return [val]
+
+
+    def compare_lists(list1, list2):
+        if list1 is None and list2 is None:
+            return True
+        if list1 is None or list2 is None:
+            return False
+        
+        shorter_list = list1 if len(list1) < len(list2) else list2
+        longer_list = list1 if len(list1) >= len(list2) else list2
+        return shorter_list == longer_list[:len(shorter_list)]
+
+
+    for i, batch in enumerate(default_wrapper):
+        shuffled_ids = batch.get("id", None)
+        original_idxs = batch.get("original_idx", None)
+        print(f"Default Batch {i} shuffled IDs:", shuffled_ids, "Original indices:", original_idxs)
+        for original_idx in _ensure_list(original_idxs):
+            if original_idx not in label_map_original:
+                label_map_original[original_idx] = batch.get("label", None)
+            elif not compare_lists(label_map_original[original_idx], batch.get("label", None)):
+                print(f"Warning: Original index {original_idx} has multiple labels: {label_map_original[original_idx]} and {batch.get('label', None)}")
+        default_shuffled.extend(_ensure_list(shuffled_ids))
+        default_original.extend(_ensure_list(original_idxs))
+
+    for i, batch in enumerate(oversample_wrapper):
+        shuffled_ids = batch.get("id", None)
+        original_idxs = batch.get("original_idx", None)
+        for original_idx in _ensure_list(original_idxs):
+            if original_idx not in label_map:
+                label_map[original_idx] = batch.get("label", None)
+            elif not compare_lists(label_map[original_idx], batch.get("label", None)):
+                print(f"Warning: Original index {original_idx} has multiple labels: {label_map[original_idx]} and {batch.get('label', None)}")
+
+        print(f"Batch {i} shuffled IDs:", shuffled_ids, "Original indices:", original_idxs)
+        seen_shuffled.extend(_ensure_list(shuffled_ids))
+        seen_original.extend(_ensure_list(original_idxs))
+
+
+    seen_shuffled = sorted(seen_shuffled)
+    seen_original = sorted(seen_original)
+
+    print("Checking seen shuffled and original indices...")
+    seen_per_example_usages = np.zeros(len(train_dataset))
+    for id_val in seen_shuffled:
+        seen_per_example_usages[id_val] += 1
+
+    # confirm that seen_per_examples usages matches the expected per_example_usages
+    if not np.array_equal(seen_per_example_usages, per_example_usages):
+        print("Mismatch in per_example_usages:")
+        print("Expected:", per_example_usages)
+        print("Seen:", seen_per_example_usages)
+    print("Finished comparison to per_example_usages.")
+
+
+    print("Seen shuffled IDs:", seen_shuffled)
+    print("Seen original indices:", seen_original)
+        #print(batch)
+
+    seen_set = set(seen_original)
+    expected_train_set = set(expected_train_ogs)
+    expected_val_set = set(expected_val_ogs)
+
+    # Training check — items in expected_train not in seen_original
+    missing_train = expected_train_set - seen_set
+    for idx in missing_train:
+        print(f"Expected train original index {idx} not found in seen original indices.")
+
+    # Validation check — items in expected_val that accidentally appear in training
+    val_in_train = expected_val_set & seen_set
+    for idx in val_in_train:
+        print(f"Expected validation original index {idx} found in seen original indices, but it should not be in the training set.")
+    exit()
+
+    print("Test completed.")

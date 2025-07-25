@@ -15,6 +15,9 @@ from consts import *
 from collections import OrderedDict
 from safetensors.torch import load_file
 import warnings
+from datasets import load_dataset, get_dataset_config_names
+from peft import LoraConfig, get_peft_model
+from peft import PeftModel, PeftConfig
 
 
 def is_running_distributed():
@@ -189,6 +192,19 @@ def _tokenize_fn(strings: Sequence[str], tokenizer: transformers.PreTrainedToken
         labels_lens=labels_lens,
     )
 
+def preprocess_no_tokenize(
+    sources: Sequence[str],
+    targets: Sequence[str],
+    tokenizer: transformers.PreTrainedTokenizer,
+) -> Dict:
+    """Fast version: skip tokenization, preserve original_idx structure."""
+    input_ids = [[] for _ in sources]
+    labels = [[] for _ in sources]
+    original_idx = [[] for _ in sources]
+
+    return dict(input_ids=input_ids, labels=labels, original_idx=original_idx)
+
+
 def preprocess(
     sources: Sequence[str],
     targets: Sequence[str],
@@ -198,19 +214,25 @@ def preprocess(
     examples = [s + t for s, t in zip(sources, targets)]
     examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
     input_ids = examples_tokenized["input_ids"]
+    original_idx = examples_tokenized.get("original_idx", None)
+    if original_idx is not None:
+        original_idx = torch.tensor(original_idx, dtype=torch.long)
     labels = copy.deepcopy(input_ids)
     for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
         label[:source_len] = LLAMA_IGNORE_INDEX
-    return dict(input_ids=input_ids, labels=labels)
+    return dict(input_ids=input_ids, labels=labels, original_idx=original_idx)
 
 
 ## DATASETS / DATALOADER
 class SupervisedDataset(Dataset):
     """Dataset for sft."""
-    def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer):
+    def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer, eval=False):
         super(SupervisedDataset, self).__init__()
+        #print("Supervised Dataset Created with data_path:", data_path)
         logging.warning("Loading data...")
-        
+        self.val_data = None
+        self.train_og_index = None  # store original index if available
+
         if isinstance(data_path, list): # if data_path is a list of data dicts
             list_data_dict = data_path
         elif data_path.endswith(".jsonl"):
@@ -228,21 +250,257 @@ class SupervisedDataset(Dataset):
                     # print(f"making supervised_dataset -> jload('{data_path}') FAILED: {e_str}")
                     continue
         elif 'MathInstruct' in data_path:
-            list_data_dict = load_dataset(data_path)["train"]  # fixed -> for indexing all samples
+            print("utils mathinstruct")
+            raw_dataset = load_dataset(data_path)["train"]  # fixed -> for indexing all samples
 
-            list_data_dict = list_data_dict.shuffle(seed=42)
-            train_num = int(len(list_data_dict)*0.95)
-            list_data_dict = list_data_dict.select(range(train_num))
+            raw_dataset = raw_dataset.add_column("original_idx", list(range(len(raw_dataset))))
 
-            #val_data = split_dataset["test"]
+            dataset = raw_dataset.shuffle(seed=42)
 
-            #keep_only, keep_only_train = 500, 250
-            #list_data_dict = [list_data_dict[i] for i in range(keep_only_train)]
-            
-            self.train_data = [list_data_dict[i] for i in range(len(list_data_dict))]
+            train_num = int(len(dataset)*0.95)
+
+            train_data = dataset.select(range(train_num))
+
+            val_data = dataset.select(range(train_num, len(dataset)))
+
+            self.train_og_index = torch.tensor(train_data["original_idx"])
+            self.val_og_index = torch.tensor(val_data["original_idx"])
+
+            list_data_dict = train_data
+
+
+            #keep_only, keep_only_train = 500, 500
+            #list_data_dict = list_data_dict.select(range(keep_only_train))
+            #val_data = val_data.select(range(keep_only))
+
+            if eval:
+                list_data_dict = val_data
+
+
+            print("\n[DEBUG] First 3 formatted examples from MathInstruct:\n")
+            for i in range(1):
+                ex = list_data_dict[i]
+                example = {
+                    "instruction": ex["instruction"].strip(),
+                    "input": "",  # MathInstruct does not have separate 'input' field
+                    "output": ex["output"].strip()
+                }
+                try:
+                    formatted = PROMPT_DICT["prompt_input"].format_map(example) \
+                        if example["input"] != "" \
+                        else PROMPT_DICT["prompt_no_input"].format_map(example)
+                    print(f"Example {i} formatted prompt:\n{formatted}")
+                    print(f"Expected Output:\n{example['output']}")
+                    print("-" * 40)
+                except Exception as e:
+                    print(f"Formatting failed for example {i}: {e}")
+
+
         elif 'Asclepius' in data_path:
             list_data_dict = load_dataset(data_path)["train"]  # fixesd -> for indexing all samples
             list_data_dict = [{'instruction':data['question'], 'input':data['note'], 'output':data['answer'], 'source':data['task']} for data in list_data_dict]
+        
+        elif 'ChilleD/SVAMP' in data_path or 'svamp' in data_path.lower():
+            data_df = load_dataset(data_path)["train"]
+            list_data_dict = []
+
+            print("\n[DEBUG] First 3 formatted examples from SVAMP:\n")
+            for i, ex in enumerate(data_df):
+                instruction = f"{ex['Body'].strip()} {ex['Question'].strip()}"
+                output = str(ex['Answer']).strip()
+
+                example = dict(
+                    instruction=instruction,
+                    input="",  # Force empty input to trigger prompt_no_input
+                    output=output,
+                    source='SVAMP'
+                )
+
+                # Print prompt to visually confirm formatting
+                if i < 1:
+                    try:
+                        formatted = PROMPT_DICT["prompt_no_input"].format_map(example)
+                        print(f"Example {i} formatted prompt:\n{formatted}\n{'-'*40}")
+                        print(f"Expected Output:\n{example['output']}")
+                    except Exception as e:
+                        print(f"Formatting error on example {i}: {e}")
+
+                list_data_dict.append(example)
+
+        elif 'deepmind/math_dataset' in data_path:
+            list_data_dict = []
+            branches = get_dataset_config_names("deepmind/math_dataset", trust_remote_code=True)
+
+            import ast 
+            def safe_decode(x):
+                if isinstance(x, bytes):
+                    return x.decode("utf-8")
+                if isinstance(x, str) and x.startswith("b'") and x.endswith("'"):
+                    try:
+                        # Convert string literal to bytes, then decode
+                        return ast.literal_eval(x).decode("utf-8")
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to unwrap byte string: {x} ({e})")
+                        return x
+                return x
+                
+            total_printed = 0
+
+            for branch in branches:
+                print(f"\nLoading DeepMind Math branch: {branch}")
+                ds = load_dataset("deepmind/math_dataset", branch, split="test", trust_remote_code=True)
+
+                for i, ex in enumerate(ds):
+                    question = safe_decode(ex["question"]).strip()
+                    answer = safe_decode(ex["answer"]).strip()
+
+                    example = dict(
+                        instruction=question,
+                        input="",
+                        output=answer,
+                        source=f"deepmind_math_{branch}"
+                    )
+
+                    if total_printed < 1:
+                        total_printed += 1
+                        try:
+                            formatted = (
+                                PROMPT_DICT["prompt_input"].format_map(example)
+                                if example.get("input", "") != ""
+                                else PROMPT_DICT["prompt_no_input"].format_map(example)
+                            )
+                            print(f"[DEBUG] Branch: {branch}, Example {i} formatted prompt:\n{formatted}\n----------------------------------------")
+                            print(f"Expected Output:\n{example['output']}")
+                        except Exception as e:
+                            print(f"Formatting failed for branch {branch}, example {i}: {e}")
+
+                    list_data_dict.append(example)
+
+        elif 'simuleq' in data_path.lower():
+            dataset = load_dataset("allenai/lila", "simuleq", split="train")
+            list_data_dict = []
+
+            print("\n[DEBUG] First 3 formatted examples from SimulEq:\n")
+            for i, ex in enumerate(dataset):
+                instruction = ex["input"].strip()
+                output = ex["output_answer"].strip()
+
+                example = dict(
+                    instruction=instruction,
+                    input="",  # Always empty, enforce no_input prompt
+                    output=output,
+                    source="SimulEq"
+                )
+
+                if i < 1:
+                    try:
+                        formatted = PROMPT_DICT["prompt_no_input"].format_map(example)
+                        print(f"Example {i} formatted prompt:\n{formatted}\n{'-'*40}")
+                        print(f"Expected Output:\n{example['output']}")
+                    except Exception as e:
+                        print(f"Formatting error on SimulEq example {i}: {e}")
+
+                list_data_dict.append(example)
+
+        elif 'gsm8k' in data_path.lower():
+            list_data_dict = []
+            gsm_split = data_path.split(":")[1] if ":" in data_path else "main"
+            ds = load_dataset("gsm8k", gsm_split, split="test")
+
+            print("\n[DEBUG] First 3 formatted examples from GSM8K:\n")
+            for i, ex in enumerate(ds):
+                instruction = ex["question"].strip()
+                output = ex["answer"].strip()
+
+                example = {
+                    'instruction': instruction,
+                    'input': "",
+                    'output': output,
+                    'source': f"gsm8k_{gsm_split}"
+                }
+
+                if i < 1:
+                    try:
+                        formatted = PROMPT_DICT["prompt_no_input"].format_map(example)
+                        print(f"Example {i} formatted prompt:\n{formatted}\n{'-'*40}")
+                        print(f"Expected Output:\n{example['output']}")
+                    except Exception as e:
+                        print(f"Formatting error on GSM8K example {i}: {e}")
+
+                list_data_dict.append(example)
+        elif "hendrycks_math" in data_path.lower():
+            list_data_dict = []
+            branches = get_dataset_config_names("EleutherAI/hendrycks_math")
+
+            total_printed = 0
+
+            for branch in branches:
+                print(f"Loading Hendrycks Math branch: {branch}")
+                ds = load_dataset("EleutherAI/hendrycks_math", branch, split="test")
+
+                for i, ex in enumerate(ds):
+                    question = ex["problem"].strip()
+                    answer = ex["solution"].strip()
+
+                    example = dict(
+                        instruction=question,
+                        input="",
+                        output=answer,
+                        source=f"hendrycks_math_{branch}"
+                    )
+
+                    if i < total_printed:  # Limit debug print per branch
+                        total_printed += 1
+                        try:
+                            formatted = PROMPT_DICT["prompt_no_input"].format_map(example)
+                            print(f"[DEBUG] Branch: {branch}, Example {i} formatted prompt:\n{formatted}\n{'-'*40}")
+                            print(f"Expected Output:\n{example['output']}")
+                        except Exception as e:
+                            print(f"[ERROR] Formatting failed on branch {branch}, example {i}: {e}")
+
+                    list_data_dict.append(example)
+        elif "numglue" in data_path.lower():
+            import json
+
+            def load_broken_json_array(filepath):
+                with open(filepath, "r") as f:
+                    content = f.read()
+                # Split on "}\n{" and fix edge formatting
+                objects = content.strip().replace("}\n{", "}|{").split("|")
+                return [
+                    json.loads(
+                        obj if obj.startswith("{") else "{" + obj if not obj.endswith("}") else obj + "}"
+                    )
+                    for obj in objects
+                ]
+
+            list_data_dict = []
+            raw_data = load_broken_json_array("datasets/numglue/test.json")
+
+            print("\n[DEBUG] First 3 formatted examples from NumGLUE:\n")
+            for i, ex in enumerate(raw_data):
+                question = ex.get("question", "").strip()
+                raw_ans = ex.get("answer", ex.get("label", ""))
+                answer = str(raw_ans).strip()
+                task = ex.get("task", "numglue")
+
+                example = {
+                    "instruction": question,
+                    "input": "",
+                    "output": answer,
+                    "source": task
+                }
+
+                if i < 1:
+                    try:
+                        formatted = PROMPT_DICT["prompt_no_input"].format_map(example)
+                        print(f"Example {i} with prompt_input:\n{formatted}\n{'-'*40}")
+                        print(f"Expected Output:\n{example['output']}")
+                    except Exception as e:
+                        print(f"Example {i} formatting FAILED: {e}")
+
+                list_data_dict.append(example)
+
         else:
             data_df = load_dataset(data_path)["train"]
             # convert to jsonl
@@ -250,23 +508,40 @@ class SupervisedDataset(Dataset):
             for i in range(len(data_df)):
                 # parse data_df[i]['conversations'] from str to list
                 list_data_dict.append(dict(instruction=data_df[i]['conversations'][0], output=data_df[i]['conversations'][1]))
-                
+        
+        #exit()
         logging.warning("Formatting inputs...")
+        print("Length of data_dict:", len(list_data_dict))
+        print("utils: self.train_og_index", self.train_og_index)
+        #if len(list_data_dict > )
+
         if 'mimic' in data_path:
+            print("Using RADIOLOGY_PROMPT_DICT for MIMIC-CXR dataset")
             prompt_input, prompt_no_input = RADIOLOGY_PROMPT_DICT["prompt_no_input"], RADIOLOGY_PROMPT_DICT["prompt_no_input"]
         else:
+            print("Using PROMPT_DICT for general dataset")
             prompt_input, prompt_no_input = PROMPT_DICT["prompt_input"], PROMPT_DICT["prompt_no_input"]
         sources = [
             prompt_input.format_map(example) if example.get("input", "") != "" else prompt_no_input.format_map(example)
             for example in list_data_dict
         ]
+        
         targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
         logging.warning("Tokenizing inputs... This may take some time...")
-        data_dict = preprocess(sources, targets, tokenizer)
+        
+        run_fast = False
+        if not run_fast:
+            data_dict = preprocess(sources, targets, tokenizer)
+        else:
+            data_dict = preprocess_no_tokenize(sources, targets, tokenizer)
+            # just make a list of numbers for input ids!
+        
         self.input_ids = data_dict["input_ids"]
+        print("utils: SupervisedDataset: train_og_index:", self.train_og_index)
         self.labels = data_dict["labels"]
         self.ids = list(range(len(self.input_ids)))  # Ensure unique IDs are stored
         self.ids = torch.tensor(self.ids, dtype=torch.long)
+
 
     def __len__(self):
         return len(self.input_ids)
@@ -279,6 +554,7 @@ class SupervisedDataset(Dataset):
             "input_ids": self.input_ids[i], 
             "labels": self.labels[i], 
             "id": self.ids[i],  # Ensure 'id' is a tensor
+            "original_idx": self.train_og_index[i] if self.train_og_index is not None else -1
         }
     
     #def get(self, idx) -> Dict[str, torch.Tensor]:
@@ -291,24 +567,34 @@ class DataCollatorForSupervisedDataset(object):
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         #print("collator claled with instances: ", instances[0].keys())
-        input_ids, labels = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels"))
+        input_ids, labels, original_idx = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels", "original_idx"))
         ids = [instance["id"] for instance in instances]
+        original_ids = [instance.get("original_idx", None) for instance in instances]
         
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
         )
         labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=LLAMA_IGNORE_INDEX)
+
         return dict(
             input_ids=input_ids,
             labels=labels,
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
             id=torch.tensor(ids, dtype=torch.long),
+            original_idx=torch.tensor(original_ids, dtype=torch.long),
         )
 
-def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, data_path) -> Dict:
+def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, data_path, eval=False, verbose=False) -> Dict:
     """Make dataset and collator for supervised fine-tuning."""
-    train_dataset = SupervisedDataset(tokenizer=tokenizer, data_path=data_path)
+    if verbose:
+        print("utils make supervised data module with data_path:", data_path)
+    train_dataset = SupervisedDataset(tokenizer=tokenizer, data_path=data_path, eval=eval)
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+    # check if val_data is not None
+    eval_dataset = None
+
+    if verbose:
+        print("Train data og index:", train_dataset.train_og_index)
 
     """
     if torch.distributed.is_initialized():
@@ -322,7 +608,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, dat
     )
     """
 
-    return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
+    return dict(train_dataset=train_dataset, eval_dataset=eval_dataset, data_collator=data_collator)
 
 
 def load_ddp_state_dict(model_name_or_path, cache_dir=None):
@@ -367,18 +653,61 @@ def load_ddp_checkpoint(model_name_or_path, cache_dir=None):
 
 
 ## GET LLAMA-MODEL
-def get_model(model_name_or_path, cache_dir=None):   
+def get_model(model_name_or_path, cache_dir=None, use_lora=False):   
     
     if "t5" in model_name_or_path:
         model = AutoModelForSeq2SeqLM.from_pretrained(model_name_or_path, cache_dir=cache_dir)
     else:
         # get statedict
         #state_dict = torch.load(model_name_or_path, map_location="cpu")
+        print("model name: ", model_name_or_path)
+
         model = AutoModelForCausalLM.from_pretrained(model_name_or_path, cache_dir=cache_dir)
         #model = load_ddp_checkpoint(model_name_or_path, cache_dir=cache_dir)
     
+    if use_lora:
+        config = LoraConfig(
+            r=8,
+            lora_alpha=16,
+            target_modules=["q_proj", "v_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, config)
+        print("LoRA model loaded with config:", config)
+        
     
     return model
+
+
+def load_lora_model(adapter_dir: str, cache_dir: str | None = None):
+    """
+    Loads a LoRA adapter and attaches it to the correct base model.
+    Ensures vocab size matches LoRA training checkpoint.
+    """
+    peft_cfg = PeftConfig.from_pretrained(adapter_dir)
+
+    # Load tokenizer and get intended vocab size
+    tokenizer = AutoTokenizer.from_pretrained(peft_cfg.base_model_name_or_path, use_fast=True)
+    vocab_size_lora = 50299  # from your error log, manually setting it
+
+    # Load base model
+    base_model = AutoModelForCausalLM.from_pretrained(
+        peft_cfg.base_model_name_or_path,
+        cache_dir=cache_dir,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+    )
+
+    # Resize token embeddings to match LoRA adapter (if needed)
+    if base_model.get_input_embeddings().weight.size(0) != vocab_size_lora:
+        print(f"Resizing base model vocab from {base_model.get_input_embeddings().weight.size(0)} to {vocab_size_lora}")
+        base_model.resize_token_embeddings(vocab_size_lora)
+
+    # Attach the LoRA adapter
+    model = PeftModel.from_pretrained(base_model, adapter_dir)
+
+    return model, tokenizer
 
 
 ## WHITENINING
